@@ -1,0 +1,26 @@
+[package]
+name = "tweet-broadcast"
+version = "0.1.0"
+authors = ["Wonwoo Choi <chwo9843@gmail.com>"]
+edition = "2021"
+
+[dependencies]
+async-stream = "0.3.2"
+bytes = "1.1.0"
+serde_json = "1.0.69"
+futures-util = "0.3.17"
+thiserror = "1.0.30"
+
+[dependencies.tokio]
+version = "1.13.0"
+default-features = false
+features = ["rt-multi-thread", "signal", "io-util", "time", "macros", "parking_lot"]
+
+[dependencies.reqwest]
+version = "0.11.6"
+default-features = false
+features = ["rustls-tls", "gzip", "brotli", "stream"]
+
+[dependencies.serde]
+version = "1.0.130"
+features = ["derive"]
