@@ -57,19 +57,30 @@ fn make_stream(mut resp: reqwest::Response) -> impl Stream<Item = Result<tweet::
             .await??)
     }
 
-    async_stream::try_stream! {
+    async_stream::stream! {
         let mut s = Vec::new();
-        while let Some(bytes) = read_single(&mut resp).await? {
-            let mut lines = bytes.split(|&b| b == b'\n');
-            s.extend(lines.next().unwrap().iter().copied());
-            for line in lines {
-                let string = String::from_utf8_lossy(&s);
-                let string = string.as_ref().trim();
-                if !string.is_empty() {
-                    let line = serde_json::from_str(string)?;
-                    yield line;
+        loop {
+            match read_single(&mut resp).await {
+                Err(e) => {
+                    yield Err(e);
+                    break;
                 }
-                s = line.to_vec();
+                Ok(None) => {
+                    break;
+                }
+                Ok(Some(bytes)) => {
+                    let mut lines = bytes.split(|&b| b == b'\n');
+                    s.extend(lines.next().unwrap().iter().copied());
+                    for line in lines {
+                        let string = String::from_utf8_lossy(&s);
+                        let string = string.as_ref().trim();
+                        if !string.is_empty() {
+                            yield serde_json::from_str(string)
+                                .map_err(|e| Error::parse_error(string.to_owned(), e));
+                        }
+                        s = line.to_vec();
+                    }
+                }
             }
         }
     }
@@ -175,14 +186,55 @@ async fn main() {
                 },
             };
             let line = match line_result {
-                Ok(line) => line,
+                Ok(tweet::TwitterResponse::Error(e)) => {
+                    eprintln!("Twitter error: {}", e);
+                    backoff_type.add_server();
+                    break;
+                }
+                Ok(tweet::TwitterResponse::Ok(line)) => line,
+                Err(Error::Parse(e)) => {
+                    eprintln!("Parse error: {}", e);
+                    eprintln!("  while parsing: {}", e.string());
+                    continue;
+                }
                 Err(e) => {
                     eprintln!("Stream error: {}", e);
                     backoff_type.add_network();
                     break;
                 }
             };
-            println!("{:#?}", line);
+
+            let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
+                line.includes().get_tweet(rt_id).unwrap()
+            } else {
+                line.data()
+            };
+            let author_id = real_tweet.author_id().unwrap();
+            let author = line.includes().get_user(author_id).unwrap();
+            let tweet_metrics = real_tweet.metrics().unwrap();
+            let user_metrics = author.metrics().unwrap();
+            let score = tweet_broadcast::compute_score(tweet_metrics, user_metrics, real_tweet.created_at().unwrap());
+
+            println!(
+                "{author_name} (@{author_username}):{possibly_sensitive}",
+                author_name = author.name(),
+                author_username = author.username(),
+                possibly_sensitive = if real_tweet.possibly_sensitive() { " [!]" } else { "" }
+            );
+            for line in real_tweet.unescaped_text().split('\n') {
+                println!("  {}", line);
+            }
+            print!("    Tags:");
+            for rule in line.matching_rules().unwrap() {
+                print!(" {}", rule.tag());
+            }
+            println!();
+            println!("    Score: {:.4}", score);
+            for key in real_tweet.media_keys() {
+                let media = line.includes().get_media(key).unwrap();
+                println!("    {} ({}x{})", media.url().unwrap(), media.width(), media.height());
+            }
+            println!();
         }
     }
 }

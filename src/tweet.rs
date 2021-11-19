@@ -1,10 +1,12 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Tweet {
     id: String,
     text: String,
-    created_at: Option<String>,
+    created_at: Option<DateTime<Utc>>,
     author_id: Option<String>,
     #[serde(default)]
     entities: Entities,
@@ -32,8 +34,8 @@ impl Tweet {
             .replace("&amp;", "&")
     }
 
-    pub fn created_at(&self) -> Option<&str> {
-        self.created_at.as_deref()
+    pub fn created_at(&self) -> Option<DateTime<Utc>> {
+        self.created_at
     }
 
     pub fn author_id(&self) -> Option<&str> {
@@ -76,7 +78,7 @@ pub struct Attachments {
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Entities {
     hashtags: Vec<Hashtag>,
-    urls: Vec<Url>,
+    urls: Vec<UrlEntity>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -87,7 +89,7 @@ pub struct Hashtag {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Url {
+pub struct UrlEntity {
     start: usize,
     end: usize,
     url: String,
@@ -150,8 +152,8 @@ impl User {
         &self.username
     }
 
-    pub fn profile_image_url(&self) -> Option<&str> {
-        self.profile_image_url.as_deref()
+    pub fn profile_image_url(&self) -> Option<Url> {
+        self.profile_image_url.as_ref().and_then(|s| Url::parse(s).ok())
     }
 
     pub fn metrics(&self) -> Option<&UserPublicMetrics> {
@@ -204,8 +206,15 @@ impl Media {
         self.ty
     }
 
-    pub fn url(&self) -> Option<&str> {
-        self.url.as_deref().or(self.preview_image_url.as_deref())
+    pub fn url(&self) -> Option<Url> {
+        self.url
+            .as_deref()
+            .or(self.preview_image_url.as_deref())
+            .and_then(|s| Url::parse(s).ok())
+            .map(|mut url| {
+                url.set_query(Some("name=orig"));
+                url
+            })
     }
 }
 
@@ -216,6 +225,24 @@ pub struct ResponseItem<Data> {
     includes: ResponseIncludes,
     matching_rules: Option<Vec<MatchingRule>>,
     errors: Option<Vec<TwitterError>>,
+}
+
+impl<Data> ResponseItem<Data> {
+    pub fn data(&self) -> &Data {
+        &self.data
+    }
+
+    pub fn includes(&self) -> &ResponseIncludes {
+        &self.includes
+    }
+
+    pub fn matching_rules(&self) -> Option<&[MatchingRule]> {
+        self.matching_rules.as_deref()
+    }
+
+    pub fn errors(&self) -> &[TwitterError] {
+        self.errors.as_deref().unwrap_or(&[])
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -261,7 +288,8 @@ pub struct TwitterError {
     message: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, thiserror::Error)]
+#[error("{title}: {detail} {ty}")]
 pub struct ResponseError {
     errors: Vec<TwitterError>,
     title: String,
