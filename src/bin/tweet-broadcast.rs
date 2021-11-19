@@ -4,6 +4,12 @@ use futures_util::{Stream, StreamExt, TryFutureExt};
 use reqwest::Client;
 use tokio::signal::unix as unix_signal;
 
+use tweet_broadcast::{
+    tweet,
+    BackoffType,
+    Error,
+};
+
 macro_rules! concat_param {
     ($param1:literal $(, $param:literal)*) => {
         concat!($param1 $(, ",", $param)*)
@@ -44,83 +50,7 @@ fn create_endpoint_url() -> reqwest::Url {
     url
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-enum BackoffType {
-    None,
-    Ratelimit(u32),
-    Server(u32),
-    Network(u32),
-}
-
-impl BackoffType {
-    fn sleep_msecs(&self) -> u64 {
-        match self {
-            &Self::None => 0,
-            &Self::Ratelimit(n) => {
-                let mins = if n < 4 { 1u64 << n } else { 10u64 };
-                mins * 60 * 1000
-            }
-            &Self::Network(n) => {
-                if n < 60 {
-                    (n as u64) * 500
-                } else {
-                    30000
-                }
-            }
-            &Self::Server(n) => {
-                let secs = if n < 6 { 1u64 << n } else { 60 };
-                secs * 1000
-            }
-        }
-    }
-
-    fn should_backoff(&self) -> bool {
-        !matches!(self, Self::None)
-    }
-
-    fn add_ratelimit(&mut self) {
-        match self {
-            Self::Ratelimit(n) => {
-                *n += 1;
-            }
-            _ => {
-                *self = Self::Ratelimit(1);
-            }
-        }
-    }
-
-    fn add_network(&mut self) {
-        match self {
-            Self::Network(n) => {
-                *n += 1;
-            }
-            _ => {
-                *self = Self::Network(1);
-            }
-        }
-    }
-
-    fn add_server(&mut self) {
-        match self {
-            Self::Server(n) => {
-                *n += 1;
-            }
-            _ => {
-                *self = Self::Server(1);
-            }
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum Error {
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-}
-
-fn make_stream(mut resp: reqwest::Response) -> impl Stream<Item = Result<String, Error>> {
+fn make_stream(mut resp: reqwest::Response) -> impl Stream<Item = Result<tweet::TwitterResponse<tweet::Tweet>, Error>> {
     async fn read_single(resp: &mut reqwest::Response) -> Result<Option<bytes::Bytes>, Error> {
         Ok(tokio::time::timeout(Duration::from_secs(30), resp.chunk())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::TimedOut, e))
@@ -133,8 +63,12 @@ fn make_stream(mut resp: reqwest::Response) -> impl Stream<Item = Result<String,
             let mut lines = bytes.split(|&b| b == b'\n');
             s.extend(lines.next().unwrap().iter().copied());
             for line in lines {
-                let val = String::from_utf8(s).unwrap();
-                yield val;
+                let string = String::from_utf8_lossy(&s);
+                let string = string.as_ref().trim();
+                if !string.is_empty() {
+                    let line = serde_json::from_str(string)?;
+                    yield line;
+                }
                 s = line.to_vec();
             }
         }
@@ -248,7 +182,7 @@ async fn main() {
                     break;
                 }
             };
-            println!("{}", line);
+            println!("{:#?}", line);
         }
     }
 }
