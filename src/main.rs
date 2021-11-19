@@ -14,28 +14,32 @@ fn create_endpoint_url() -> reqwest::Url {
     const STREAM_ENDPOINT: &'static str = "https://api.twitter.com/2/tweets/search/stream";
     let mut url = reqwest::Url::parse(STREAM_ENDPOINT).unwrap();
     url.query_pairs_mut()
-        .append_pair("expansions", concat_param![
-            "author_id",
-            "referenced_tweets.id",
-            "referenced_tweets.id.author_id",
-            "attachments.media_keys"
-        ])
-        .append_pair("tweet.fields", concat_param![
-            "created_at",
-            "entities",
-            "public_metrics",
-            "possibly_sensitive"
-        ])
-        .append_pair("user.fields", concat_param![
-            "profile_image_url",
-            "public_metrics"
-        ])
-        .append_pair("media.fields", concat_param![
-            "width",
-            "height",
-            "url",
-            "preview_image_url"
-        ])
+        .append_pair(
+            "expansions",
+            concat_param![
+                "author_id",
+                "referenced_tweets.id",
+                "referenced_tweets.id.author_id",
+                "attachments.media_keys"
+            ],
+        )
+        .append_pair(
+            "tweet.fields",
+            concat_param![
+                "created_at",
+                "entities",
+                "public_metrics",
+                "possibly_sensitive"
+            ],
+        )
+        .append_pair(
+            "user.fields",
+            concat_param!["profile_image_url", "public_metrics"],
+        )
+        .append_pair(
+            "media.fields",
+            concat_param!["width", "height", "url", "preview_image_url"],
+        )
         .finish();
     url
 }
@@ -53,28 +57,20 @@ impl BackoffType {
         match self {
             &Self::None => 0,
             &Self::Ratelimit(n) => {
-                let mins = if n < 4 {
-                    1u64 << n
-                } else {
-                    10u64
-                };
+                let mins = if n < 4 { 1u64 << n } else { 10u64 };
                 mins * 60 * 1000
-            },
+            }
             &Self::Network(n) => {
                 if n < 60 {
                     (n as u64) * 500
                 } else {
                     30000
                 }
-            },
+            }
             &Self::Server(n) => {
-                let secs = if n < 6 {
-                    1u64 << n
-                } else {
-                    60
-                };
+                let secs = if n < 6 { 1u64 << n } else { 60 };
                 secs * 1000
-            },
+            }
         }
     }
 
@@ -147,24 +143,27 @@ fn make_stream(mut resp: reqwest::Response) -> impl Stream<Item = Result<String,
 
 #[tokio::main]
 async fn main() {
-    let token = std::env::var("TWITTER_APP_TOKEN")
-        .expect("TWITTER_APP_TOKEN not found or invalid");
+    let token = std::env::var("TWITTER_APP_TOKEN").expect("TWITTER_APP_TOKEN not found or invalid");
 
     let endpoint_url = create_endpoint_url();
 
     let client = Client::builder()
         .gzip(true)
         .brotli(true)
-        .user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .build()
         .expect("Failed to build HTTP client");
 
     let mut sigterm = unix_signal::signal(unix_signal::SignalKind::terminate())
         .expect("Failed to listen SIGTERM");
-    let mut sigint = unix_signal::signal(unix_signal::SignalKind::interrupt())
-        .expect("Failed to listen SIGINT");
-    let mut sigquit = unix_signal::signal(unix_signal::SignalKind::quit())
-        .expect("Failed to listen SIGQUIT");
+    let mut sigint =
+        unix_signal::signal(unix_signal::SignalKind::interrupt()).expect("Failed to listen SIGINT");
+    let mut sigquit =
+        unix_signal::signal(unix_signal::SignalKind::quit()).expect("Failed to listen SIGQUIT");
 
     let sigterm = sigterm.recv();
     futures_util::pin_mut!(sigterm);
@@ -200,7 +199,7 @@ async fn main() {
                 eprintln!("Failed to connect: {}", e);
                 backoff_type.add_network();
                 continue;
-            },
+            }
         };
 
         let resp = match resp.error_for_status() {
@@ -209,16 +208,16 @@ async fn main() {
                 eprintln!("Request is ratelimited");
                 backoff_type.add_ratelimit();
                 continue;
-            },
+            }
             Err(e) if e.status().map(|s| s.is_server_error()).unwrap_or(false) => {
                 eprintln!("Server side error: {}", e);
                 backoff_type.add_server();
                 continue;
-            },
+            }
             Err(e) => {
                 eprintln!("Unknown error: {}", e);
                 break;
-            },
+            }
         };
 
         backoff_type = BackoffType::None;
@@ -247,7 +246,7 @@ async fn main() {
                     eprintln!("Stream error: {}", e);
                     backoff_type.add_network();
                     break;
-                },
+                }
             };
             println!("{}", line);
         }
