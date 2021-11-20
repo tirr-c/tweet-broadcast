@@ -87,7 +87,7 @@ fn make_stream(
 #[tokio::main]
 async fn main() {
     let token = std::env::var("TWITTER_APP_TOKEN").expect("TWITTER_APP_TOKEN not found or invalid");
-    let cache_dir = std::env::var_os("CACHE_DIR")
+    let cache_dir = std::env::var_os("TWITTER_CACHE")
         .or_else(|| {
             let path = std::env::current_dir().ok()?;
             Some(path.join(".tweets").into_os_string())
