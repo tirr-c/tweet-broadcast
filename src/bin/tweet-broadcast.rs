@@ -89,9 +89,7 @@ fn make_stream(mut resp: reqwest::Response) -> impl Stream<Item = Result<tweet::
 #[tokio::main]
 async fn main() {
     let token = std::env::var("TWITTER_APP_TOKEN").expect("TWITTER_APP_TOKEN not found or invalid");
-
     let endpoint_url = create_endpoint_url();
-
     let client = Client::builder()
         .gzip(true)
         .brotli(true)
@@ -102,6 +100,13 @@ async fn main() {
         ))
         .build()
         .expect("Failed to build HTTP client");
+
+    let platform = v8::Platform::new(0, false).make_shared();
+    v8::V8::initialize_platform(platform);
+    v8::V8::initialize();
+    let mut isolate = v8::Isolate::new(Default::default());
+    let mut router = tweet_broadcast::Router::new(&mut isolate);
+    let mut route_fn = router.load().expect("Failed to load router");
 
     let mut sigterm = unix_signal::signal(unix_signal::SignalKind::terminate())
         .expect("Failed to listen SIGTERM");
@@ -203,6 +208,16 @@ async fn main() {
                     break;
                 }
             };
+
+            let routes = match route_fn.call(&line) {
+                Ok(routes) => routes,
+                Err(e) => {
+                    eprintln!("Failed to route: {}", e);
+                    eprintln!("Input: {:#?}", line);
+                    continue;
+                },
+            };
+            dbg!(routes);
 
             let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
                 line.includes().get_tweet(rt_id).unwrap()

@@ -6,6 +6,12 @@ pub enum Error {
     Io(#[from] #[source] std::io::Error),
     #[error(transparent)]
     Parse(#[from] ParseError),
+    #[error("JS function {0} not found, or is not a function")]
+    FunctionNotFound(String),
+    #[error("Uncaught exception: {0}")]
+    JsException(String),
+    #[error("cannot convert V8 data: {0}")]
+    JsInterop(#[from] #[source] serde_v8::Error),
 }
 
 impl Error {
