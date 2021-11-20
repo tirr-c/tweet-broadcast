@@ -34,3 +34,6 @@ features = ["rt-multi-thread", "fs", "signal", "io-util", "time", "macros", "par
 [dependencies.url]
 version = "2.2.2"
 features = ["serde"]
+
+[profile.release]
+lto = true
