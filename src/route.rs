@@ -73,6 +73,7 @@ struct RoutePayload<'a> {
     media: Vec<&'a crate::tweet::Media>,
     score: f64,
     tags: Vec<&'a str>,
+    cached: bool,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -107,11 +108,36 @@ pub struct RouteResultItem {
     pub payload: serde_json::Value,
 }
 
+#[derive(Debug)]
+pub struct RouteResult<'a> {
+    payload: RoutePayload<'a>,
+    routes: Vec<RouteResultItem>,
+}
+
+impl RouteResult<'_> {
+    pub async fn save_cache(&self, cache_dir: impl AsRef<std::path::Path>) -> Result<(), Error> {
+        let id = self.payload.tweet.id();
+        let meta_path = cache_dir.as_ref().join(format!("meta/{}.json", id));
+        let data = serde_json::to_vec_pretty(&self.payload).unwrap();
+        tokio::fs::write(meta_path, data).await?;
+        Ok(())
+    }
+
+    pub fn cached(&self) -> bool {
+        self.payload.cached
+    }
+
+    pub fn routes(&self) -> &[RouteResultItem] {
+        &self.routes
+    }
+}
+
 impl<'ctx, 's> RouterFn<'ctx, 's> {
-    pub fn call(
+    pub async fn call<'data>(
         &mut self,
-        data: &crate::tweet::ResponseItem<crate::tweet::Tweet>,
-    ) -> Result<Vec<RouteResultItem>, Error> {
+        data: &'data crate::tweet::ResponseItem<crate::tweet::Tweet>,
+        cache_dir: impl AsRef<std::path::Path>,
+    ) -> Result<RouteResult<'data>, Error> {
         let tweet = if let Some(rt_id) = data.data().get_retweet_source() {
             Some(data.includes().get_tweet(rt_id).unwrap())
         } else {
@@ -128,6 +154,9 @@ impl<'ctx, 's> RouterFn<'ctx, 's> {
         let tweet = tweet.unwrap_or(data.data());
         let author_id = tweet.author_id().unwrap();
         let author = data.includes().get_user(author_id).unwrap();
+
+        let meta_path = cache_dir.as_ref().join(format!("meta/{}.json", tweet.id()));
+        let has_cache = tokio::fs::metadata(meta_path).await.is_ok();
 
         let tweet_metrics = tweet.metrics().unwrap();
         let user_metrics = author.metrics().unwrap();
@@ -153,6 +182,7 @@ impl<'ctx, 's> RouterFn<'ctx, 's> {
             media,
             score,
             tags,
+            cached: has_cache,
         };
 
         let scope = &mut v8::TryCatch::new(&mut self.script_scope);
@@ -167,6 +197,10 @@ impl<'ctx, 's> RouterFn<'ctx, 's> {
         }
         let ret = ret.unwrap();
 
-        Ok(serde_v8::from_v8(scope, ret)?)
+        let routes = serde_v8::from_v8(scope, ret)?;
+        Ok(RouteResult {
+            payload: data,
+            routes,
+        })
     }
 }

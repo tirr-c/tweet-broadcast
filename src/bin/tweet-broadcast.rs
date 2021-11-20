@@ -87,6 +87,17 @@ fn make_stream(
 #[tokio::main]
 async fn main() {
     let token = std::env::var("TWITTER_APP_TOKEN").expect("TWITTER_APP_TOKEN not found or invalid");
+    let cache_dir = std::env::var_os("CACHE_DIR")
+        .or_else(|| {
+            let path = std::env::current_dir().ok()?;
+            Some(path.join(".tweets").into_os_string())
+        })
+        .and_then(|path| std::fs::create_dir_all(&path).ok().map(|_| path))
+        .expect("Invalid cache directory");
+    let cache_dir = std::path::PathBuf::from(cache_dir);
+    std::fs::create_dir_all(cache_dir.join("meta")).unwrap();
+    std::fs::create_dir_all(cache_dir.join("images")).unwrap();
+
     let endpoint_url = create_endpoint_url();
     let client = Client::builder()
         .gzip(true)
@@ -207,8 +218,8 @@ async fn main() {
                 }
             };
 
-            let routes = match route_fn.call(&line) {
-                Ok(routes) => routes,
+            let route_result = match route_fn.call(&line, &cache_dir).await {
+                Ok(route_result) => route_result,
                 Err(e) => {
                     eprintln!("Failed to route: {}", e);
                     eprintln!("Input: {:#?}", line);
@@ -231,17 +242,27 @@ async fn main() {
                 real_tweet.created_at().unwrap(),
             );
 
+            let routes = route_result.routes();
+            let cached = route_result.cached();
             if routes.is_empty() {
-                println!("No routes: {}", real_tweet.id());
+                println!("No routes: {}{}", real_tweet.id(), if cached { " (cached)" } else { "" });
                 println!("  Score: {:.4}", score);
             } else {
+                if !cached {
+                    if let Err(e) = route_result.save_cache(&cache_dir).await {
+                        eprintln!("Failed to save metadata: {}", e);
+                    }
+                }
+
                 for route in routes {
                     let client = client.clone();
+                    let url = route.url.clone();
+                    let payload = serde_json::to_vec(&route.payload).unwrap();
                     tokio::spawn(async move {
                         let result = client
-                            .post(route.url)
+                            .post(url)
                             .header("content-type", "application/json")
-                            .body(serde_json::to_vec(&route.payload).unwrap())
+                            .body(payload)
                             .send()
                             .await;
                         match result {
