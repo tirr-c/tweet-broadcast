@@ -65,8 +65,8 @@ impl<'s> Router<'s> {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct RouteResultItem {
-    url: String,
-    payload: serde_json::Value,
+    pub url: url::Url,
+    pub payload: serde_json::Value,
 }
 
 impl<'ctx, 's> RouterFn<'ctx, 's> {

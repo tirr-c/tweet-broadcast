@@ -71,11 +71,13 @@ impl Tweet {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Attachments {
     media_keys: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Entities {
     hashtags: Vec<Hashtag>,
     urls: Vec<UrlEntity>,
@@ -92,9 +94,9 @@ pub struct Hashtag {
 pub struct UrlEntity {
     start: usize,
     end: usize,
-    url: String,
+    url: Url,
     display_url: String,
-    expanded_url: String,
+    expanded_url: Url,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -135,7 +137,7 @@ pub struct User {
     id: String,
     name: String,
     username: String,
-    profile_image_url: Option<String>,
+    profile_image_url: Option<Url>,
     public_metrics: Option<UserPublicMetrics>,
 }
 
@@ -152,8 +154,8 @@ impl User {
         &self.username
     }
 
-    pub fn profile_image_url(&self) -> Option<Url> {
-        self.profile_image_url.as_ref().and_then(|s| Url::parse(s).ok())
+    pub fn profile_image_url(&self) -> Option<&Url> {
+        self.profile_image_url.as_ref()
     }
 
     pub fn metrics(&self) -> Option<&UserPublicMetrics> {
@@ -176,8 +178,8 @@ pub struct Media {
     height: u64,
     #[serde(rename = "type")]
     ty: MediaType,
-    url: Option<String>,
-    preview_image_url: Option<String>,
+    url: Option<Url>,
+    preview_image_url: Option<Url>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize, Serialize)]
@@ -206,15 +208,10 @@ impl Media {
         self.ty
     }
 
-    pub fn url(&self) -> Option<Url> {
+    pub fn url(&self) -> Option<&Url> {
         self.url
-            .as_deref()
-            .or(self.preview_image_url.as_deref())
-            .and_then(|s| Url::parse(s).ok())
-            .map(|mut url| {
-                url.set_query(Some("name=orig"));
-                url
-            })
+            .as_ref()
+            .or(self.preview_image_url.as_ref())
     }
 }
 

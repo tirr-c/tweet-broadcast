@@ -217,7 +217,29 @@ async fn main() {
                     continue;
                 },
             };
-            dbg!(routes);
+
+            for route in routes {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .post(route.url)
+                        .header("content-type", "application/json")
+                        .body(serde_json::to_vec(&route.payload).unwrap())
+                        .send()
+                        .await;
+                    match result {
+                        Err(e) => {
+                            eprintln!("Failed to send: {}", e);
+                        }
+                        Ok(resp) => {
+                            if !resp.status().is_success() {
+                                let resp = resp.text().await.unwrap();
+                                eprintln!("Submission failed: {}", resp);
+                            }
+                        }
+                    }
+                });
+            }
 
             let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
                 line.includes().get_tweet(rt_id).unwrap()
