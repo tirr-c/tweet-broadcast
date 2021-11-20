@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tweet {
     id: String,
     text: String,
@@ -70,27 +70,27 @@ impl Tweet {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Attachments {
     media_keys: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Entities {
     hashtags: Vec<Hashtag>,
     urls: Vec<UrlEntity>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Hashtag {
     start: usize,
     end: usize,
     tag: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UrlEntity {
     start: usize,
     end: usize,
@@ -99,7 +99,7 @@ pub struct UrlEntity {
     expanded_url: Url,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TweetPublicMetrics {
     pub reply_count: u64,
     pub retweet_count: u64,
@@ -107,7 +107,7 @@ pub struct TweetPublicMetrics {
     pub like_count: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReferencedTweet {
     #[serde(rename = "type")]
     ty: TweetReferenceType,
@@ -132,7 +132,7 @@ impl ReferencedTweet {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct User {
     id: String,
     name: String,
@@ -163,7 +163,7 @@ impl User {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserPublicMetrics {
     pub followers_count: u64,
     pub following_count: u64,
@@ -171,7 +171,7 @@ pub struct UserPublicMetrics {
     pub listed_count: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Media {
     media_key: String,
     width: u64,
@@ -213,7 +213,7 @@ impl Media {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponseItem<Data> {
     data: Data,
     #[serde(default)]
@@ -240,7 +240,7 @@ impl<Data> ResponseItem<Data> {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ResponseIncludes {
     tweets: Vec<Tweet>,
@@ -262,7 +262,7 @@ impl ResponseIncludes {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MatchingRule {
     id: String,
     tag: String,
@@ -278,12 +278,12 @@ impl MatchingRule {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TwitterError {
     message: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, thiserror::Error)]
+#[derive(Debug, Clone, Deserialize, Serialize, thiserror::Error)]
 #[error("{title}: {detail} {ty}")]
 pub struct ResponseError {
     errors: Vec<TwitterError>,
@@ -293,7 +293,7 @@ pub struct ResponseError {
     ty: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum TwitterResponse<Data> {
     Error(ResponseError),

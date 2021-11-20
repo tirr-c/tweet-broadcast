@@ -63,6 +63,44 @@ impl<'s> Router<'s> {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoutePayload<'a> {
+    tweet: &'a crate::tweet::Tweet,
+    author: &'a crate::tweet::User,
+    original_tweet: Option<&'a crate::tweet::Tweet>,
+    original_author: Option<&'a crate::tweet::User>,
+    media: Vec<&'a crate::tweet::Media>,
+    score: f64,
+    tags: Vec<&'a str>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheData {
+    tweet: crate::tweet::Tweet,
+    author: crate::tweet::User,
+    original_tweet: Option<crate::tweet::Tweet>,
+    original_author: Option<crate::tweet::User>,
+    media: Vec<crate::tweet::Media>,
+    score: f64,
+    tags: Vec<String>,
+}
+
+impl From<RoutePayload<'_>> for CacheData {
+    fn from(payload: RoutePayload<'_>) -> Self {
+        Self {
+            tweet: payload.tweet.clone(),
+            author: payload.author.clone(),
+            original_tweet: payload.original_tweet.cloned(),
+            original_author: payload.original_author.cloned(),
+            media: payload.media.into_iter().cloned().collect(),
+            score: payload.score,
+            tags: payload.tags.into_iter().map(ToOwned::to_owned).collect(),
+        }
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct RouteResultItem {
     pub url: url::Url,
@@ -95,51 +133,30 @@ impl<'ctx, 's> RouterFn<'ctx, 's> {
         let user_metrics = author.metrics().unwrap();
         let score = crate::compute_score(tweet_metrics, user_metrics, tweet.created_at().unwrap());
 
-        let scope = &mut v8::TryCatch::new(&mut self.script_scope);
-        let data_obj = v8::Object::new(scope);
-
-        {
-            let tweet = serde_v8::to_v8(scope, tweet)?;
-            let key = v8::String::new(scope, "tweet").unwrap();
-            data_obj.set(scope, key.into(), tweet);
-
-            let author = serde_v8::to_v8(scope, author)?;
-            let key = v8::String::new(scope, "author").unwrap();
-            data_obj.set(scope, key.into(), author);
-        }
-
-        if let Some((tweet, author)) = original_data {
-            let tweet = serde_v8::to_v8(scope, tweet)?;
-            let key = v8::String::new(scope, "originalTweet").unwrap();
-            data_obj.set(scope, key.into(), tweet);
-
-            let author = serde_v8::to_v8(scope, author)?;
-            let key = v8::String::new(scope, "originalAuthor").unwrap();
-            data_obj.set(scope, key.into(), author);
-        }
-
         let media = tweet
             .media_keys()
             .iter()
             .filter_map(|k| data.includes().get_media(k))
             .collect::<Vec<_>>();
-        let media = serde_v8::to_v8(scope, media)?;
-        let key = v8::String::new(scope, "media").unwrap();
-        data_obj.set(scope, key.into(), media);
-
-        let score = v8::Number::new(scope, score);
-        let key = v8::String::new(scope, "score").unwrap();
-        data_obj.set(scope, key.into(), score.into());
-
         let tags = data
             .matching_rules()
             .unwrap_or(&[])
             .iter()
             .map(|x| x.tag())
             .collect::<Vec<_>>();
-        let tags = serde_v8::to_v8(scope, tags)?;
-        let key = v8::String::new(scope, "tags").unwrap();
-        data_obj.set(scope, key.into(), tags);
+
+        let data = RoutePayload {
+            tweet,
+            author,
+            original_tweet: original_data.as_ref().map(|&(tweet, _)| tweet),
+            original_author: original_data.as_ref().map(|&(_, author)| author),
+            media,
+            score,
+            tags,
+        };
+
+        let scope = &mut v8::TryCatch::new(&mut self.script_scope);
+        let data_obj = serde_v8::to_v8(scope, &data)?;
 
         let recv = v8::undefined(scope);
         let ret = self.route_fn.call(scope, recv.into(), &[data_obj.into()]);
@@ -148,7 +165,7 @@ impl<'ctx, 's> RouterFn<'ctx, 's> {
             let msg = msg.get(scope).to_rust_string_lossy(scope);
             return Err(Error::JsException(msg));
         }
-        let ret = if let Some(ret) = ret { ret } else { todo!() };
+        let ret = ret.unwrap();
 
         Ok(serde_v8::from_v8(scope, ret)?)
     }
