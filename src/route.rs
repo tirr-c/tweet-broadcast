@@ -73,8 +73,7 @@ impl<'ctx, 's> RouterFn<'ctx, 's> {
     pub fn call(
         &mut self,
         data: &crate::tweet::ResponseItem<crate::tweet::Tweet>,
-    ) -> Result<Vec<RouteResultItem>, Error>
-    {
+    ) -> Result<Vec<RouteResultItem>, Error> {
         let tweet = if let Some(rt_id) = data.data().get_retweet_source() {
             Some(data.includes().get_tweet(rt_id).unwrap())
         } else {
@@ -143,21 +142,13 @@ impl<'ctx, 's> RouterFn<'ctx, 's> {
         data_obj.set(scope, key.into(), tags);
 
         let recv = v8::undefined(scope);
-        let ret = self.route_fn.call(
-            scope,
-            recv.into(),
-            &[data_obj.into()],
-        );
+        let ret = self.route_fn.call(scope, recv.into(), &[data_obj.into()]);
         if scope.has_caught() {
             let msg = scope.message().unwrap();
             let msg = msg.get(scope).to_rust_string_lossy(scope);
             return Err(Error::JsException(msg));
         }
-        let ret = if let Some(ret) = ret {
-            ret
-        } else {
-            todo!()
-        };
+        let ret = if let Some(ret) = ret { ret } else { todo!() };
 
         Ok(serde_v8::from_v8(scope, ret)?)
     }

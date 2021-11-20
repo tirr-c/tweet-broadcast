@@ -1,13 +1,12 @@
 use chrono::{DateTime, Utc};
 
-use super::tweet::{UserPublicMetrics, TweetPublicMetrics};
+use super::tweet::{TweetPublicMetrics, UserPublicMetrics};
 
 pub fn compute_score(
     tweet_metrics: &TweetPublicMetrics,
     user_metrics: &UserPublicMetrics,
     created_at: DateTime<Utc>,
-) -> f64
-{
+) -> f64 {
     let time_diff = Utc::now() - created_at;
     let days_diff = time_diff.num_milliseconds() as f64 / (1000 * 60 * 60 * 24) as f64;
 
@@ -32,7 +31,10 @@ pub fn compute_score(
 
     let f_log_y = -2.0f64.log10() + 0.2f64.log10() * 1e-5 * followers as f64;
     let follower_adjust = 1.5f64 - 10.0f64.powf(f_log_y);
-    let follow_rate_adjust = (1.0f64 - (4.0 / 9.0) * (followers as f64 / following as f64).powi(2)).max(0.0);
+    let follow_rate_adjust =
+        (1.0f64 - (4.0 / 9.0) * (followers as f64 / following as f64).powi(2)).max(0.0);
 
-    ((rt_score + like_score) / follower_adjust - follow_rate_adjust).max(0.0) * 30.0 * 1.5f64.powf((10.0 - days_diff) / 10.0)
+    ((rt_score + like_score) / follower_adjust - follow_rate_adjust).max(0.0)
+        * 30.0
+        * 1.5f64.powf((10.0 - days_diff) / 10.0)
 }

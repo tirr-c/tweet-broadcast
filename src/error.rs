@@ -1,9 +1,17 @@
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("HTTP error: {0}")]
-    Http(#[from] #[source] reqwest::Error),
+    Http(
+        #[from]
+        #[source]
+        reqwest::Error,
+    ),
     #[error("I/O error: {0}")]
-    Io(#[from] #[source] std::io::Error),
+    Io(
+        #[from]
+        #[source]
+        std::io::Error,
+    ),
     #[error(transparent)]
     Parse(#[from] ParseError),
     #[error("JS function {0} not found, or is not a function")]
@@ -11,7 +19,11 @@ pub enum Error {
     #[error("Uncaught exception: {0}")]
     JsException(String),
     #[error("cannot convert V8 data: {0}")]
-    JsInterop(#[from] #[source] serde_v8::Error),
+    JsInterop(
+        #[from]
+        #[source]
+        serde_v8::Error,
+    ),
 }
 
 impl Error {

@@ -4,11 +4,7 @@ use futures_util::{Stream, StreamExt, TryFutureExt};
 use reqwest::Client;
 use tokio::signal::unix as unix_signal;
 
-use tweet_broadcast::{
-    tweet,
-    BackoffType,
-    Error,
-};
+use tweet_broadcast::{tweet, BackoffType, Error};
 
 macro_rules! concat_param {
     ($param1:literal $(, $param:literal)*) => {
@@ -50,7 +46,9 @@ fn create_endpoint_url() -> reqwest::Url {
     url
 }
 
-fn make_stream(mut resp: reqwest::Response) -> impl Stream<Item = Result<tweet::TwitterResponse<tweet::Tweet>, Error>> {
+fn make_stream(
+    mut resp: reqwest::Response,
+) -> impl Stream<Item = Result<tweet::TwitterResponse<tweet::Tweet>, Error>> {
     async fn read_single(resp: &mut reqwest::Response) -> Result<Option<bytes::Bytes>, Error> {
         Ok(tokio::time::timeout(Duration::from_secs(30), resp.chunk())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::TimedOut, e))
@@ -215,31 +213,8 @@ async fn main() {
                     eprintln!("Failed to route: {}", e);
                     eprintln!("Input: {:#?}", line);
                     continue;
-                },
+                }
             };
-
-            for route in routes {
-                let client = client.clone();
-                tokio::spawn(async move {
-                    let result = client
-                        .post(route.url)
-                        .header("content-type", "application/json")
-                        .body(serde_json::to_vec(&route.payload).unwrap())
-                        .send()
-                        .await;
-                    match result {
-                        Err(e) => {
-                            eprintln!("Failed to send: {}", e);
-                        }
-                        Ok(resp) => {
-                            if !resp.status().is_success() {
-                                let resp = resp.text().await.unwrap();
-                                eprintln!("Submission failed: {}", resp);
-                            }
-                        }
-                    }
-                });
-            }
 
             let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
                 line.includes().get_tweet(rt_id).unwrap()
@@ -250,28 +225,69 @@ async fn main() {
             let author = line.includes().get_user(author_id).unwrap();
             let tweet_metrics = real_tweet.metrics().unwrap();
             let user_metrics = author.metrics().unwrap();
-            let score = tweet_broadcast::compute_score(tweet_metrics, user_metrics, real_tweet.created_at().unwrap());
-
-            println!(
-                "{author_name} (@{author_username}):{possibly_sensitive}",
-                author_name = author.name(),
-                author_username = author.username(),
-                possibly_sensitive = if real_tweet.possibly_sensitive() { " [!]" } else { "" }
+            let score = tweet_broadcast::compute_score(
+                tweet_metrics,
+                user_metrics,
+                real_tweet.created_at().unwrap(),
             );
-            for line in real_tweet.unescaped_text().split('\n') {
-                println!("  {}", line);
+
+            if routes.is_empty() {
+                println!("No routes: {}", real_tweet.id());
+                println!("  Score: {:.4}", score);
+            } else {
+                for route in routes {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        let result = client
+                            .post(route.url)
+                            .header("content-type", "application/json")
+                            .body(serde_json::to_vec(&route.payload).unwrap())
+                            .send()
+                            .await;
+                        match result {
+                            Err(e) => {
+                                eprintln!("Failed to send: {}", e);
+                            }
+                            Ok(resp) => {
+                                if !resp.status().is_success() {
+                                    let resp = resp.text().await.unwrap();
+                                    eprintln!("Submission failed: {}", resp);
+                                }
+                            }
+                        }
+                    });
+                }
+
+                println!(
+                    "{author_name} (@{author_username}):{possibly_sensitive}",
+                    author_name = author.name(),
+                    author_username = author.username(),
+                    possibly_sensitive = if real_tweet.possibly_sensitive() {
+                        " [!]"
+                    } else {
+                        ""
+                    }
+                );
+                for line in real_tweet.unescaped_text().split('\n') {
+                    println!("  {}", line);
+                }
+                print!("    Tags:");
+                for rule in line.matching_rules().unwrap() {
+                    print!(" {}", rule.tag());
+                }
+                println!();
+                println!("    Score: {:.4}", score);
+                for key in real_tweet.media_keys() {
+                    let media = line.includes().get_media(key).unwrap();
+                    println!(
+                        "    {} ({}x{})",
+                        media.url().unwrap(),
+                        media.width(),
+                        media.height()
+                    );
+                }
+                println!();
             }
-            print!("    Tags:");
-            for rule in line.matching_rules().unwrap() {
-                print!(" {}", rule.tag());
-            }
-            println!();
-            println!("    Score: {:.4}", score);
-            for key in real_tweet.media_keys() {
-                let media = line.includes().get_media(key).unwrap();
-                println!("    {} ({}x{})", media.url().unwrap(), media.width(), media.height());
-            }
-            println!();
         }
     }
 }
