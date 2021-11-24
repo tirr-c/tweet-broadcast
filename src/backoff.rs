@@ -11,18 +11,22 @@ impl BackoffType {
         match self {
             &Self::None => 0,
             &Self::Ratelimit(n) => {
-                let mins = if n < 4 { 1u64 << n } else { 10u64 };
+                let mins = if n < 6 {
+                    1u64 << (n.saturating_sub(2))
+                } else {
+                    10u64
+                };
                 mins * 60 * 1000
             }
             &Self::Network(n) => {
-                if n < 60 {
-                    (n as u64) * 500
+                if n < 128 {
+                    (n as u64) * 250
                 } else {
-                    30000
+                    32000
                 }
             }
             &Self::Server(n) => {
-                let secs = if n < 6 { 1u64 << n } else { 60 };
+                let secs = if n < 6 { 1u64 << n.saturating_sub(1) } else { 60 };
                 secs * 1000
             }
         }
