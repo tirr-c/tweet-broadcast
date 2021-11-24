@@ -260,7 +260,11 @@ async fn main() {
             let routes = route_result.routes();
             let cached = route_result.cached();
             if routes.is_empty() {
-                println!("No routes: {}{}", real_tweet.id(), if cached { " (cached)" } else { "" });
+                println!(
+                    "No routes: {}{}",
+                    real_tweet.id(),
+                    if cached { " (cached)" } else { "" }
+                );
                 println!("  Score: {:.4}", score);
             } else {
                 if !cached {

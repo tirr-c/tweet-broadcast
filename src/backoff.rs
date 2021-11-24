@@ -26,7 +26,11 @@ impl BackoffType {
                 }
             }
             &Self::Server(n) => {
-                let secs = if n < 6 { 1u64 << n.saturating_sub(1) } else { 60 };
+                let secs = if n < 6 {
+                    1u64 << n.saturating_sub(1)
+                } else {
+                    60
+                };
                 secs * 1000
             }
         }
