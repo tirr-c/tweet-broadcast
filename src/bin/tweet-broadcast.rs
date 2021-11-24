@@ -98,6 +98,14 @@ async fn main() {
     std::fs::create_dir_all(cache_dir.join("meta")).unwrap();
     std::fs::create_dir_all(cache_dir.join("images")).unwrap();
 
+    let _sentry = sentry::init((
+        std::env::var_os("SENTRY_DSN"),
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            ..Default::default()
+        },
+    ));
+
     let endpoint_url = create_endpoint_url();
     let client = Client::builder()
         .gzip(true)
@@ -156,6 +164,7 @@ async fn main() {
             Ok(resp) => resp,
             Err(e) => {
                 eprintln!("Failed to connect: {}", e);
+                sentry::capture_error(&e);
                 backoff_type.add_network();
                 continue;
             }
@@ -170,11 +179,13 @@ async fn main() {
             }
             Err(e) if e.status().map(|s| s.is_server_error()).unwrap_or(false) => {
                 eprintln!("Server side error: {}", e);
+                sentry::capture_error(&e);
                 backoff_type.add_server();
                 continue;
             }
             Err(e) => {
                 eprintln!("Unknown error: {}", e);
+                sentry::capture_error(&e);
                 break;
             }
         };
@@ -202,6 +213,7 @@ async fn main() {
             let line = match line_result {
                 Ok(tweet::TwitterResponse::Error(e)) => {
                     eprintln!("Twitter error: {}", e);
+                    sentry::capture_error(&e);
                     backoff_type.add_server();
                     break;
                 }
@@ -209,10 +221,12 @@ async fn main() {
                 Err(Error::Parse(e)) => {
                     eprintln!("Parse error: {}", e);
                     eprintln!("  while parsing: {}", e.string());
+                    sentry::capture_error(&e);
                     continue;
                 }
                 Err(e) => {
                     eprintln!("Stream error: {}", e);
+                    sentry::capture_error(&e);
                     backoff_type.add_network();
                     break;
                 }
@@ -223,6 +237,7 @@ async fn main() {
                 Err(e) => {
                     eprintln!("Failed to route: {}", e);
                     eprintln!("Input: {:#?}", line);
+                    sentry::capture_error(&e);
                     continue;
                 }
             };
@@ -251,6 +266,7 @@ async fn main() {
                 if !cached {
                     if let Err(e) = route_result.save_cache(&cache_dir).await {
                         eprintln!("Failed to save metadata: {}", e);
+                        sentry::capture_error(&e);
                     }
                 }
 
@@ -268,6 +284,7 @@ async fn main() {
                         match result {
                             Err(e) => {
                                 eprintln!("Failed to send: {}", e);
+                                sentry::capture_error(&e);
                             }
                             Ok(resp) => {
                                 if !resp.status().is_success() {
