@@ -25,7 +25,7 @@ features = ["rustls-tls", "gzip", "brotli", "stream"]
 [dependencies.sentry]
 version = "0.23.0"
 default-features = false
-features = ["backtrace", "contexts", "panic", "transport", "reqwest", "rustls"]
+features = ["backtrace", "contexts", "panic", "reqwest", "rustls"]
 
 [dependencies.serde]
 version = "1.0.130"
