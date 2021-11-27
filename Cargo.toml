@@ -1,6 +1,6 @@
 [package]
 name = "tweet-broadcast"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Wonwoo Choi <chwo9843@gmail.com>"]
 edition = "2021"
 
