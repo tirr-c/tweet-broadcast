@@ -91,17 +91,18 @@ fn make_stream(
     }
 }
 
-async fn retrieve_single(client: Client, token: String, id: String) -> Result<tweet::TwitterResponse<tweet::Tweet>, Error> {
+async fn retrieve_single(
+    client: Client,
+    token: String,
+    id: String,
+) -> Result<tweet::TwitterResponse<tweet::Tweet>, Error> {
     const TWEET_ENDPOINT: &'static str = "https://api.twitter.com/2/tweets";
     let mut url = TWEET_ENDPOINT.parse::<reqwest::Url>().unwrap();
     url.path_segments_mut().unwrap().push(&id);
     url.query_pairs_mut()
         .append_pair(
             "expansions",
-            concat_param![
-                "author_id",
-                "attachments.media_keys"
-            ],
+            concat_param!["author_id", "attachments.media_keys"],
         )
         .append_pair(
             "tweet.fields",
@@ -314,10 +315,14 @@ async fn main() {
                     data: [
                         (String::from("id"), line.data().id().into()),
                         (String::from("referenced_tweet_id"), real_tweet.id().into()),
-                    ].into_iter().collect(),
+                    ]
+                    .into_iter()
+                    .collect(),
                     ..Default::default()
                 });
-                let tweet = retrieve_single(client.clone(), token.clone(), real_tweet.id().to_owned()).await;
+                let tweet =
+                    retrieve_single(client.clone(), token.clone(), real_tweet.id().to_owned())
+                        .await;
                 match tweet {
                     Ok(tweet::TwitterResponse::Ok(t)) => {
                         line.augment(t);
@@ -339,7 +344,8 @@ async fn main() {
                     eprintln!("Failed to route: {}", e);
                     eprintln!("Input: {:#?}", line);
                     let mut ev = sentry::event_from_error(&e);
-                    ev.extra.insert(String::from("data"), format!("{:?}", line).into());
+                    ev.extra
+                        .insert(String::from("data"), format!("{:?}", line).into());
                     sentry::capture_event(ev);
                     continue;
                 }
