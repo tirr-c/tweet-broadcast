@@ -41,4 +41,5 @@ version = "2.2.2"
 features = ["serde"]
 
 [profile.release]
+debug = 1  # line information only
 lto = true
