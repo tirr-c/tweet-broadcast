@@ -187,8 +187,7 @@ pub struct Media {
 pub enum MediaType {
     Photo,
     Video,
-    #[serde(rename = "gif")]
-    GIF,
+    AnimatedGif,
 }
 
 impl Media {
@@ -237,6 +236,12 @@ impl<Data> ResponseItem<Data> {
 
     pub fn errors(&self) -> &[TwitterError] {
         self.errors.as_deref().unwrap_or(&[])
+    }
+
+    pub fn augment<Other>(&mut self, other: ResponseItem<Other>) {
+        self.includes.tweets.extend(other.includes.tweets);
+        self.includes.users.extend(other.includes.users);
+        self.includes.media.extend(other.includes.media);
     }
 }
 

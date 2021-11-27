@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use futures_util::{Stream, StreamExt, TryFutureExt};
 use reqwest::Client;
+use sentry::Breadcrumb;
 use tokio::signal::unix as unix_signal;
 
 use tweet_broadcast::{tweet, BackoffType, Error};
@@ -73,6 +74,12 @@ fn make_stream(
                         let string = String::from_utf8_lossy(&s);
                         let string = string.as_ref().trim();
                         if !string.is_empty() {
+                            sentry::add_breadcrumb(Breadcrumb {
+                                category: Some(String::from("parse")),
+                                message: Some(string.to_owned()),
+                                level: sentry::Level::Info,
+                                ..Default::default()
+                            });
                             yield serde_json::from_str(string)
                                 .map_err(|e| Error::parse_error(string.to_owned(), e));
                         }
@@ -82,6 +89,48 @@ fn make_stream(
             }
         }
     }
+}
+
+async fn retrieve_single(client: Client, token: String, id: String) -> Result<tweet::TwitterResponse<tweet::Tweet>, Error> {
+    const TWEET_ENDPOINT: &'static str = "https://api.twitter.com/2/tweets";
+    let mut url = TWEET_ENDPOINT.parse::<reqwest::Url>().unwrap();
+    url.path_segments_mut().unwrap().push(&id);
+    url.query_pairs_mut()
+        .append_pair(
+            "expansions",
+            concat_param![
+                "author_id",
+                "attachments.media_keys"
+            ],
+        )
+        .append_pair(
+            "tweet.fields",
+            concat_param![
+                "created_at",
+                "entities",
+                "public_metrics",
+                "possibly_sensitive"
+            ],
+        )
+        .append_pair(
+            "user.fields",
+            concat_param!["profile_image_url", "public_metrics"],
+        )
+        .append_pair(
+            "media.fields",
+            concat_param!["width", "height", "url", "preview_image_url"],
+        )
+        .finish();
+
+    let resp = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let resp = resp.json::<tweet::TwitterResponse<tweet::Tweet>>().await?;
+    Ok(resp)
 }
 
 #[tokio::main]
@@ -145,6 +194,12 @@ async fn main() {
         if backoff_type.should_backoff() {
             let sleep_msecs = backoff_type.sleep_msecs();
             eprintln!("Waiting {} ms...", sleep_msecs);
+            sentry::add_breadcrumb(Breadcrumb {
+                category: Some(String::from("network")),
+                message: Some(format!("Waiting for {} ms", sleep_msecs)),
+                level: sentry::Level::Info,
+                ..Default::default()
+            });
             let sleep = tokio::time::sleep(Duration::from_millis(sleep_msecs));
             futures_util::pin_mut!(sleep);
             tokio::select! {
@@ -174,6 +229,7 @@ async fn main() {
             Ok(resp) => resp,
             Err(e) if e.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
                 eprintln!("Request is ratelimited");
+                sentry::capture_message("Request is ratelimited", sentry::Level::Warning);
                 backoff_type.add_ratelimit();
                 continue;
             }
@@ -201,6 +257,7 @@ async fn main() {
                         Some(line_result) => line_result,
                         None => {
                             eprintln!("Stream closed");
+                            sentry::capture_message("Stream closed", sentry::Level::Info);
                             backoff_type.add_network();
                             break;
                         },
@@ -210,7 +267,7 @@ async fn main() {
                     break 'retry;
                 },
             };
-            let line = match line_result {
+            let mut line = match line_result {
                 Ok(tweet::TwitterResponse::Error(e)) => {
                     eprintln!("Twitter error: {}", e);
                     sentry::capture_error(&e);
@@ -221,7 +278,9 @@ async fn main() {
                 Err(Error::Parse(e)) => {
                     eprintln!("Parse error: {}", e);
                     eprintln!("  while parsing: {}", e.string());
-                    sentry::capture_error(&e);
+                    let mut ev = sentry::event_from_error(&e);
+                    ev.extra.insert(String::from("message"), e.string().into());
+                    sentry::capture_event(ev);
                     continue;
                 }
                 Err(e) => {
@@ -232,12 +291,56 @@ async fn main() {
                 }
             };
 
+            let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
+                line.includes().get_tweet(rt_id).unwrap()
+            } else {
+                line.data()
+            };
+
+            // check media first
+            let media_keys = real_tweet.media_keys();
+            let key_count = media_keys.len();
+            let media = media_keys
+                .iter()
+                .filter_map(|k| line.includes().get_media(k))
+                .collect::<Vec<_>>();
+
+            if key_count != media.len() {
+                // retrieve tweet again
+                sentry::add_breadcrumb(Breadcrumb {
+                    category: Some(String::from("tweet")),
+                    message: Some(String::from("Media info missing, fetching tweet info")),
+                    level: sentry::Level::Info,
+                    data: [
+                        (String::from("id"), line.data().id().into()),
+                        (String::from("referenced_tweet_id"), real_tweet.id().into()),
+                    ].into_iter().collect(),
+                    ..Default::default()
+                });
+                let tweet = retrieve_single(client.clone(), token.clone(), real_tweet.id().to_owned()).await;
+                match tweet {
+                    Ok(tweet::TwitterResponse::Ok(t)) => {
+                        line.augment(t);
+                    }
+                    Ok(tweet::TwitterResponse::Error(e)) => {
+                        eprintln!("Failed to retrieve original tweet: {}", e);
+                        sentry::capture_error(&e);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to retrieve original tweet: {}", e);
+                        sentry::capture_error(&e);
+                    }
+                }
+            }
+
             let route_result = match route_fn.call(&line, &cache_dir).await {
                 Ok(route_result) => route_result,
                 Err(e) => {
                     eprintln!("Failed to route: {}", e);
                     eprintln!("Input: {:#?}", line);
-                    sentry::capture_error(&e);
+                    let mut ev = sentry::event_from_error(&e);
+                    ev.extra.insert(String::from("data"), format!("{:?}", line).into());
+                    sentry::capture_event(ev);
                     continue;
                 }
             };
