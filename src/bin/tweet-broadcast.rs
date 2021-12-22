@@ -171,9 +171,7 @@ async fn main() {
     let platform = v8::Platform::new(0, false).make_shared();
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
-    let mut isolate = v8::Isolate::new(Default::default());
-    let mut router = tweet_broadcast::Router::new(&mut isolate);
-    let mut route_fn = router.load().expect("Failed to load router");
+    let mut router = tweet_broadcast::Router::new(128 * 1024 * 1024).expect("Failed to load router");
 
     let mut sigterm = unix_signal::signal(unix_signal::SignalKind::terminate())
         .expect("Failed to listen SIGTERM");
@@ -338,7 +336,7 @@ async fn main() {
                 }
             }
 
-            let route_result = match route_fn.call(&line, &cache_dir).await {
+            let route_result = match router.call(&line, &cache_dir).await {
                 Ok(route_result) => route_result,
                 Err(e) => {
                     eprintln!("Failed to route: {}", e);
