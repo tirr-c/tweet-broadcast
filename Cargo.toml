@@ -1,7 +1,8 @@
 [package]
 name = "tweet-broadcast"
-version = "0.1.2"
+version = "0.1.3"
 authors = ["Wonwoo Choi <chwo9843@gmail.com>"]
+license = "MIT"
 edition = "2021"
 
 [dependencies]
