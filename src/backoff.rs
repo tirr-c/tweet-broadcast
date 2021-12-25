@@ -1,13 +1,78 @@
+use futures_util::future::BoxFuture;
+
+#[non_exhaustive]
+pub struct Backoff {
+    backoff_fn: Box<dyn FnMut(std::time::Duration) -> BoxFuture<'static, ()>>,
+}
+
+impl std::fmt::Debug for Backoff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Backoff").finish_non_exhaustive()
+    }
+}
+
+impl Backoff {
+    fn default_backoff_fn(duration: std::time::Duration) -> BoxFuture<'static, ()> {
+        eprintln!("Waiting {} ms...", duration.as_millis());
+        let sleep = tokio::time::sleep(duration);
+        Box::pin(sleep)
+    }
+
+    pub fn new() -> Self {
+        Self {
+            backoff_fn: Box::new(Backoff::default_backoff_fn),
+        }
+    }
+
+    pub fn backoff_fn(&mut self, f: impl FnMut(std::time::Duration) -> BoxFuture<'static, ()> + 'static) {
+        self.backoff_fn = Box::new(f);
+    }
+
+    pub async fn run_fn<Ret, Func, Fut>(&mut self, mut f: Func, cancel: impl std::future::Future<Output = ()>) -> Option<Ret> where
+        Func: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<Ret, BackoffType>>,
+    {
+        let mut state = BackoffState::None;
+        futures_util::pin_mut!(cancel);
+        loop {
+            if state.should_backoff() {
+                let duration = std::time::Duration::from_millis(state.sleep_msecs());
+                let mut sleep = (self.backoff_fn)(duration);
+                tokio::select! {
+                    _ = &mut sleep => {},
+                    _ = &mut cancel => {
+                        return None;
+                    },
+                }
+            }
+
+            match f().await {
+                Ok(val) => return Some(val),
+                Err(BackoffType::Ratelimit) => state.add_ratelimit(),
+                Err(BackoffType::Server) => state.add_server(),
+                Err(BackoffType::Network) => state.add_network(),
+            }
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum BackoffType {
+    Ratelimit,
+    Server,
+    Network,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum BackoffState {
     None,
     Ratelimit(u32),
     Server(u32),
     Network(u32),
 }
 
-impl BackoffType {
-    pub fn sleep_msecs(&self) -> u64 {
+impl BackoffState {
+    fn sleep_msecs(&self) -> u64 {
         match self {
             &Self::None => 0,
             &Self::Ratelimit(n) => {
@@ -36,11 +101,11 @@ impl BackoffType {
         }
     }
 
-    pub fn should_backoff(&self) -> bool {
+    fn should_backoff(&self) -> bool {
         !matches!(self, Self::None)
     }
 
-    pub fn add_ratelimit(&mut self) {
+    fn add_ratelimit(&mut self) {
         match self {
             Self::Ratelimit(n) => {
                 *n += 1;
@@ -51,7 +116,7 @@ impl BackoffType {
         }
     }
 
-    pub fn add_network(&mut self) {
+    fn add_network(&mut self) {
         match self {
             Self::Network(n) => {
                 *n += 1;
@@ -62,7 +127,7 @@ impl BackoffType {
         }
     }
 
-    pub fn add_server(&mut self) {
+    fn add_server(&mut self) {
         match self {
             Self::Server(n) => {
                 *n += 1;

@@ -12,6 +12,8 @@ pub enum Error {
         #[source]
         std::io::Error,
     ),
+    #[error("stream closed")]
+    StreamClosed,
     #[error(transparent)]
     Parse(#[from] ParseError),
     #[error("JS function {0} not found, or is not a function")]
@@ -24,6 +26,8 @@ pub enum Error {
         #[source]
         serde_v8::Error,
     ),
+    #[error(transparent)]
+    Twitter(#[from] crate::tweet::ResponseError),
 }
 
 impl Error {

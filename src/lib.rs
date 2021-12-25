@@ -5,7 +5,7 @@ mod score;
 
 pub mod tweet;
 
-pub use backoff::BackoffType;
+pub use backoff::{Backoff, BackoffType};
 pub use error::{Error, Result};
 pub use route::Router;
 pub use score::compute_score;

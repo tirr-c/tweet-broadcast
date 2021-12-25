@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-use futures_util::{Stream, StreamExt, TryFutureExt};
+use futures_util::{FutureExt, Stream, StreamExt, TryFutureExt};
 use reqwest::Client;
 use sentry::Breadcrumb;
 use tokio::signal::unix as unix_signal;
 
-use tweet_broadcast::{tweet, BackoffType, Error};
+use tweet_broadcast::{tweet, Backoff, BackoffType, Error, Router};
 
 macro_rules! concat_param {
     ($param1:literal $(, $param:literal)*) => {
@@ -93,12 +93,12 @@ fn make_stream(
 
 async fn retrieve_single(
     client: Client,
-    token: String,
-    id: String,
+    token: &str,
+    id: &str,
 ) -> Result<tweet::TwitterResponse<tweet::Tweet>, Error> {
     const TWEET_ENDPOINT: &'static str = "https://api.twitter.com/2/tweets";
     let mut url = TWEET_ENDPOINT.parse::<reqwest::Url>().unwrap();
-    url.path_segments_mut().unwrap().push(&id);
+    url.path_segments_mut().unwrap().push(id);
     url.query_pairs_mut()
         .append_pair(
             "expansions",
@@ -132,6 +132,204 @@ async fn retrieve_single(
 
     let resp = resp.json::<tweet::TwitterResponse<tweet::Tweet>>().await?;
     Ok(resp)
+}
+
+async fn run_line_loop(
+    client: Client,
+    token: &str,
+    cache_dir: &std::path::Path,
+    router: &mut Router,
+    lines: impl Stream<Item = Result<tweet::TwitterResponse<tweet::Tweet>, Error>>,
+    cancel: impl std::future::Future<Output = ()>,
+) -> Result<(), Error>
+{
+    futures_util::pin_mut!(lines);
+    futures_util::pin_mut!(cancel);
+
+    loop {
+        let line_result = tokio::select! {
+            r = lines.next() => {
+                match r {
+                    Some(line_result) => line_result,
+                    None => {
+                        eprintln!("Stream closed");
+                        sentry::capture_message("Stream closed", sentry::Level::Info);
+                        return Err(Error::StreamClosed);
+                    },
+                }
+            },
+            _ = &mut cancel => {
+                return Ok(());
+            },
+        };
+        let mut line = match line_result {
+            Ok(tweet::TwitterResponse::Error(e)) => {
+                eprintln!("Twitter error: {}", e);
+                sentry::capture_error(&e);
+                return Err(e.into());
+            }
+            Ok(tweet::TwitterResponse::Ok(line)) => line,
+            Err(Error::Parse(e)) => {
+                eprintln!("Parse error: {}", e);
+                eprintln!("  while parsing: {}", e.string());
+                let mut ev = sentry::event_from_error(&e);
+                ev.extra.insert(String::from("message"), e.string().into());
+                sentry::capture_event(ev);
+                continue;
+            }
+            Err(e) => {
+                eprintln!("Stream error: {}", e);
+                sentry::capture_error(&e);
+                return Err(e.into());
+            }
+        };
+
+        let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
+            line.includes().get_tweet(rt_id).unwrap()
+        } else {
+            line.data()
+        };
+
+        // check media first
+        let media_keys = real_tweet.media_keys();
+        let key_count = media_keys.len();
+        let media = media_keys
+            .iter()
+            .filter_map(|k| line.includes().get_media(k))
+            .collect::<Vec<_>>();
+
+        if key_count != media.len() {
+            // retrieve tweet again
+            sentry::add_breadcrumb(Breadcrumb {
+                category: Some(String::from("tweet")),
+                message: Some(String::from("Media info missing, fetching tweet info")),
+                level: sentry::Level::Info,
+                data: [
+                    (String::from("id"), line.data().id().into()),
+                    (String::from("referenced_tweet_id"), real_tweet.id().into()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            });
+            let tweet = retrieve_single(client.clone(), token, real_tweet.id()).await;
+            match tweet {
+                Ok(tweet::TwitterResponse::Ok(t)) => {
+                    line.augment(t);
+                }
+                Ok(tweet::TwitterResponse::Error(e)) => {
+                    eprintln!("Failed to retrieve original tweet: {}", e);
+                    sentry::capture_error(&e);
+                }
+                Err(e) => {
+                    eprintln!("Failed to retrieve original tweet: {}", e);
+                    sentry::capture_error(&e);
+                }
+            }
+        }
+
+        let route_result = match router.call(&line, cache_dir).await {
+            Ok(route_result) => route_result,
+            Err(e) => {
+                eprintln!("Failed to route: {}", e);
+                eprintln!("Input: {:#?}", line);
+                let mut ev = sentry::event_from_error(&e);
+                ev.extra
+                    .insert(String::from("data"), format!("{:?}", line).into());
+                sentry::capture_event(ev);
+                continue;
+            }
+        };
+
+        let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
+            line.includes().get_tweet(rt_id).unwrap()
+        } else {
+            line.data()
+        };
+        let author_id = real_tweet.author_id().unwrap();
+        let author = line.includes().get_user(author_id).unwrap();
+        let tweet_metrics = real_tweet.metrics().unwrap();
+        let user_metrics = author.metrics().unwrap();
+        let score = tweet_broadcast::compute_score(
+            tweet_metrics,
+            user_metrics,
+            real_tweet.created_at().unwrap(),
+        );
+
+        let routes = route_result.routes();
+        let cached = route_result.cached();
+        if routes.is_empty() {
+            println!(
+                "No routes: {}{}",
+                real_tweet.id(),
+                if cached { " (cached)" } else { "" }
+            );
+            println!("  Score: {:.4}", score);
+        } else {
+            if !cached {
+                if let Err(e) = route_result.save_cache(&cache_dir).await {
+                    eprintln!("Failed to save metadata: {}", e);
+                    sentry::capture_error(&e);
+                }
+            }
+
+            for route in routes {
+                let client = client.clone();
+                let url = route.url.clone();
+                let payload = serde_json::to_vec(&route.payload).unwrap();
+                tokio::spawn(async move {
+                    let result = client
+                        .post(url)
+                        .header("content-type", "application/json")
+                        .body(payload)
+                        .send()
+                        .await;
+                    match result {
+                        Err(e) => {
+                            eprintln!("Failed to send: {}", e);
+                            sentry::capture_error(&e);
+                        }
+                        Ok(resp) => {
+                            if !resp.status().is_success() {
+                                let resp = resp.text().await.unwrap();
+                                eprintln!("Submission failed: {}", resp);
+                            }
+                        }
+                    }
+                });
+            }
+
+            println!(
+                "{author_name} (@{author_username}):{possibly_sensitive}",
+                author_name = author.name(),
+                author_username = author.username(),
+                possibly_sensitive = if real_tweet.possibly_sensitive() {
+                    " [!]"
+                } else {
+                    ""
+                }
+            );
+            for line in real_tweet.unescaped_text().split('\n') {
+                println!("  {}", line);
+            }
+            print!("    Tags:");
+            for rule in line.matching_rules().unwrap() {
+                print!(" {}", rule.tag());
+            }
+            println!();
+            println!("    Score: {:.4}", score);
+            for key in real_tweet.media_keys() {
+                let media = line.includes().get_media(key).unwrap();
+                println!(
+                    "    {} ({}x{})",
+                    media.url().unwrap(),
+                    media.width(),
+                    media.height()
+                );
+            }
+            println!();
+        }
+    }
 }
 
 #[tokio::main]
@@ -171,7 +369,7 @@ async fn main() {
     let platform = v8::Platform::new(0, false).make_shared();
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
-    let mut router = tweet_broadcast::Router::new(128 * 1024 * 1024).expect("Failed to load router");
+    let mut router = Router::new(128 * 1024 * 1024).expect("Failed to load router");
 
     let mut sigterm = unix_signal::signal(unix_signal::SignalKind::terminate())
         .expect("Failed to listen SIGTERM");
@@ -186,257 +384,78 @@ async fn main() {
     futures_util::pin_mut!(sigint);
     let sigquit = sigquit.recv();
     futures_util::pin_mut!(sigquit);
-    let mut sig = futures_util::future::select_all([sigterm, sigint, sigquit]);
+    let mut sig = futures_util::future::select_all([sigterm, sigint, sigquit]).map(drop);
 
-    let mut backoff_type = BackoffType::None;
-    'retry: loop {
-        if backoff_type.should_backoff() {
-            let sleep_msecs = backoff_type.sleep_msecs();
-            eprintln!("Waiting {} ms...", sleep_msecs);
-            sentry::add_breadcrumb(Breadcrumb {
-                category: Some(String::from("network")),
-                message: Some(format!("Waiting for {} ms", sleep_msecs)),
-                level: sentry::Level::Info,
-                ..Default::default()
-            });
-            let sleep = tokio::time::sleep(Duration::from_millis(sleep_msecs));
-            futures_util::pin_mut!(sleep);
-            tokio::select! {
-                _ = &mut sleep => {},
-                _ = &mut sig => {
-                    break;
-                },
-            }
-        }
+    let mut backoff = Backoff::new();
+    backoff.backoff_fn(|duration| {
+        let sleep_msecs = duration.as_millis();
+        eprintln!("Waiting {} ms...", sleep_msecs);
+        sentry::add_breadcrumb(Breadcrumb {
+            category: Some(String::from("network")),
+            message: Some(format!("Waiting for {} ms", sleep_msecs)),
+            level: sentry::Level::Info,
+            ..Default::default()
+        });
+        Box::pin(tokio::time::sleep(duration))
+    });
 
-        let resp = client
-            .get(endpoint_url.clone())
-            .bearer_auth(&token)
-            .send()
-            .await;
-        let resp = match resp {
-            Ok(resp) => resp,
-            Err(e) => {
-                eprintln!("Failed to connect: {}", e);
-                sentry::capture_error(&e);
-                backoff_type.add_network();
-                continue;
-            }
-        };
-
-        let resp = match resp.error_for_status() {
-            Ok(resp) => resp,
-            Err(e) if e.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
-                eprintln!("Request is ratelimited");
-                sentry::capture_message("Request is ratelimited", sentry::Level::Warning);
-                backoff_type.add_ratelimit();
-                continue;
-            }
-            Err(e) if e.status().map(|s| s.is_server_error()).unwrap_or(false) => {
-                eprintln!("Server side error: {}", e);
-                sentry::capture_error(&e);
-                backoff_type.add_server();
-                continue;
-            }
-            Err(e) => {
-                eprintln!("Unknown error: {}", e);
-                sentry::capture_error(&e);
-                break;
-            }
-        };
-
-        backoff_type = BackoffType::None;
-        let lines = make_stream(resp);
-        futures_util::pin_mut!(lines);
-
-        loop {
-            let line_result = tokio::select! {
-                r = lines.next() => {
-                    match r {
-                        Some(line_result) => line_result,
-                        None => {
-                            eprintln!("Stream closed");
-                            sentry::capture_message("Stream closed", sentry::Level::Info);
-                            backoff_type.add_network();
-                            break;
-                        },
-                    }
-                },
-                _ = &mut sig => {
-                    break 'retry;
-                },
-            };
-            let mut line = match line_result {
-                Ok(tweet::TwitterResponse::Error(e)) => {
-                    eprintln!("Twitter error: {}", e);
-                    sentry::capture_error(&e);
-                    backoff_type.add_server();
-                    break;
-                }
-                Ok(tweet::TwitterResponse::Ok(line)) => line,
-                Err(Error::Parse(e)) => {
-                    eprintln!("Parse error: {}", e);
-                    eprintln!("  while parsing: {}", e.string());
-                    let mut ev = sentry::event_from_error(&e);
-                    ev.extra.insert(String::from("message"), e.string().into());
-                    sentry::capture_event(ev);
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("Stream error: {}", e);
-                    sentry::capture_error(&e);
-                    backoff_type.add_network();
-                    break;
-                }
-            };
-
-            let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
-                line.includes().get_tweet(rt_id).unwrap()
-            } else {
-                line.data()
-            };
-
-            // check media first
-            let media_keys = real_tweet.media_keys();
-            let key_count = media_keys.len();
-            let media = media_keys
-                .iter()
-                .filter_map(|k| line.includes().get_media(k))
-                .collect::<Vec<_>>();
-
-            if key_count != media.len() {
-                // retrieve tweet again
-                sentry::add_breadcrumb(Breadcrumb {
-                    category: Some(String::from("tweet")),
-                    message: Some(String::from("Media info missing, fetching tweet info")),
-                    level: sentry::Level::Info,
-                    data: [
-                        (String::from("id"), line.data().id().into()),
-                        (String::from("referenced_tweet_id"), real_tweet.id().into()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    ..Default::default()
-                });
-                let tweet =
-                    retrieve_single(client.clone(), token.clone(), real_tweet.id().to_owned())
-                        .await;
-                match tweet {
-                    Ok(tweet::TwitterResponse::Ok(t)) => {
-                        line.augment(t);
-                    }
-                    Ok(tweet::TwitterResponse::Error(e)) => {
-                        eprintln!("Failed to retrieve original tweet: {}", e);
+    loop {
+        let resp = backoff.run_fn(
+            || async {
+                let resp = client
+                    .get(endpoint_url.clone())
+                    .bearer_auth(&token)
+                    .send()
+                    .await;
+                let resp = match resp {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        eprintln!("Failed to connect: {}", e);
                         sentry::capture_error(&e);
+                        return Err(BackoffType::Network);
+                    }
+                };
+
+                let resp = match resp.error_for_status() {
+                    Ok(resp) => resp,
+                    Err(e) if e.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
+                        eprintln!("Request is ratelimited");
+                        sentry::capture_message("Request is ratelimited", sentry::Level::Warning);
+                        return Err(BackoffType::Ratelimit);
+                    }
+                    Err(e) if e.status().map(|s| s.is_server_error()).unwrap_or(false) => {
+                        eprintln!("Server side error: {}", e);
+                        sentry::capture_error(&e);
+                        return Err(BackoffType::Server);
                     }
                     Err(e) => {
-                        eprintln!("Failed to retrieve original tweet: {}", e);
+                        eprintln!("Unknown error: {}", e);
                         sentry::capture_error(&e);
+                        return Err(BackoffType::Server);
                     }
-                }
-            }
+                };
 
-            let route_result = match router.call(&line, &cache_dir).await {
-                Ok(route_result) => route_result,
-                Err(e) => {
-                    eprintln!("Failed to route: {}", e);
-                    eprintln!("Input: {:#?}", line);
-                    let mut ev = sentry::event_from_error(&e);
-                    ev.extra
-                        .insert(String::from("data"), format!("{:?}", line).into());
-                    sentry::capture_event(ev);
-                    continue;
-                }
-            };
+                Ok(resp)
+            },
+            &mut sig,
+        ).await;
+        let resp = if let Some(resp) = resp {
+            resp
+        } else {
+            break;
+        };
 
-            let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
-                line.includes().get_tweet(rt_id).unwrap()
-            } else {
-                line.data()
-            };
-            let author_id = real_tweet.author_id().unwrap();
-            let author = line.includes().get_user(author_id).unwrap();
-            let tweet_metrics = real_tweet.metrics().unwrap();
-            let user_metrics = author.metrics().unwrap();
-            let score = tweet_broadcast::compute_score(
-                tweet_metrics,
-                user_metrics,
-                real_tweet.created_at().unwrap(),
-            );
-
-            let routes = route_result.routes();
-            let cached = route_result.cached();
-            if routes.is_empty() {
-                println!(
-                    "No routes: {}{}",
-                    real_tweet.id(),
-                    if cached { " (cached)" } else { "" }
-                );
-                println!("  Score: {:.4}", score);
-            } else {
-                if !cached {
-                    if let Err(e) = route_result.save_cache(&cache_dir).await {
-                        eprintln!("Failed to save metadata: {}", e);
-                        sentry::capture_error(&e);
-                    }
-                }
-
-                for route in routes {
-                    let client = client.clone();
-                    let url = route.url.clone();
-                    let payload = serde_json::to_vec(&route.payload).unwrap();
-                    tokio::spawn(async move {
-                        let result = client
-                            .post(url)
-                            .header("content-type", "application/json")
-                            .body(payload)
-                            .send()
-                            .await;
-                        match result {
-                            Err(e) => {
-                                eprintln!("Failed to send: {}", e);
-                                sentry::capture_error(&e);
-                            }
-                            Ok(resp) => {
-                                if !resp.status().is_success() {
-                                    let resp = resp.text().await.unwrap();
-                                    eprintln!("Submission failed: {}", resp);
-                                }
-                            }
-                        }
-                    });
-                }
-
-                println!(
-                    "{author_name} (@{author_username}):{possibly_sensitive}",
-                    author_name = author.name(),
-                    author_username = author.username(),
-                    possibly_sensitive = if real_tweet.possibly_sensitive() {
-                        " [!]"
-                    } else {
-                        ""
-                    }
-                );
-                for line in real_tweet.unescaped_text().split('\n') {
-                    println!("  {}", line);
-                }
-                print!("    Tags:");
-                for rule in line.matching_rules().unwrap() {
-                    print!(" {}", rule.tag());
-                }
-                println!();
-                println!("    Score: {:.4}", score);
-                for key in real_tweet.media_keys() {
-                    let media = line.includes().get_media(key).unwrap();
-                    println!(
-                        "    {} ({}x{})",
-                        media.url().unwrap(),
-                        media.width(),
-                        media.height()
-                    );
-                }
-                println!();
-            }
+        let lines = make_stream(resp);
+        let res = run_line_loop(
+            client.clone(),
+            &token,
+            &cache_dir,
+            &mut router,
+            lines,
+            &mut sig,
+        ).await;
+        if res.is_ok() {
+            break;
         }
     }
 }
