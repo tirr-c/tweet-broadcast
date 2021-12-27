@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::{tweet::model, Error};
 
 fn load_script(isolate: &mut v8::OwnedIsolate) -> Result<v8::Global<v8::Function>, Error> {
     let mut global_scope = v8::HandleScope::new(isolate);
@@ -65,7 +65,7 @@ impl Router {
 
     pub async fn call<'data>(
         &mut self,
-        data: &'data crate::tweet::ResponseItem<crate::tweet::Tweet>,
+        data: &'data model::ResponseItem<model::Tweet>,
         cache_dir: impl AsRef<std::path::Path>,
     ) -> Result<RouteResult<'data>, Error> {
         let tweet = if let Some(rt_id) = data.data().get_retweet_source() {
@@ -147,11 +147,11 @@ impl Router {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RoutePayload<'a> {
-    tweet: &'a crate::tweet::Tweet,
-    author: &'a crate::tweet::User,
-    original_tweet: Option<&'a crate::tweet::Tweet>,
-    original_author: Option<&'a crate::tweet::User>,
-    media: Vec<&'a crate::tweet::Media>,
+    tweet: &'a model::Tweet,
+    author: &'a model::User,
+    original_tweet: Option<&'a model::Tweet>,
+    original_author: Option<&'a model::User>,
+    media: Vec<&'a model::Media>,
     score: f64,
     tags: Vec<&'a str>,
     cached: bool,
@@ -160,11 +160,11 @@ struct RoutePayload<'a> {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CacheData {
-    tweet: crate::tweet::Tweet,
-    author: crate::tweet::User,
-    original_tweet: Option<crate::tweet::Tweet>,
-    original_author: Option<crate::tweet::User>,
-    media: Vec<crate::tweet::Media>,
+    tweet: model::Tweet,
+    author: model::User,
+    original_tweet: Option<model::Tweet>,
+    original_author: Option<model::User>,
+    media: Vec<model::Media>,
     score: f64,
     tags: Vec<String>,
 }

@@ -27,7 +27,7 @@ pub enum Error {
         serde_v8::Error,
     ),
     #[error(transparent)]
-    Twitter(#[from] crate::tweet::ResponseError),
+    Twitter(#[from] crate::tweet::model::ResponseError),
 }
 
 impl Error {

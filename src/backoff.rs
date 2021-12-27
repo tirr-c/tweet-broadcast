@@ -28,26 +28,19 @@ impl Backoff {
         self.backoff_fn = Box::new(f);
     }
 
-    pub async fn run_fn<Ret, Func, Fut>(&mut self, mut f: Func, cancel: impl std::future::Future<Output = ()>) -> Option<Ret> where
+    pub async fn run_fn<Ret, Func, Fut>(&mut self, mut f: Func) -> Ret where
         Func: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<Ret, BackoffType>>,
     {
         let mut state = BackoffState::None;
-        futures_util::pin_mut!(cancel);
         loop {
             if state.should_backoff() {
                 let duration = std::time::Duration::from_millis(state.sleep_msecs());
-                let mut sleep = (self.backoff_fn)(duration);
-                tokio::select! {
-                    _ = &mut sleep => {},
-                    _ = &mut cancel => {
-                        return None;
-                    },
-                }
+                (self.backoff_fn)(duration).await;
             }
 
             match f().await {
-                Ok(val) => return Some(val),
+                Ok(val) => return val,
                 Err(BackoffType::Ratelimit) => state.add_ratelimit(),
                 Err(BackoffType::Server) => state.add_server(),
                 Err(BackoffType::Network) => state.add_network(),
