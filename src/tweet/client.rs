@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::ops::Deref;
 
+use log::{error, info};
 use reqwest::{
     header::{self, HeaderMap, HeaderValue},
     Client,
@@ -53,7 +54,7 @@ impl TwitterClient {
         let mut backoff = Backoff::new();
         backoff.backoff_fn(|duration| {
             let sleep_msecs = duration.as_millis();
-            eprintln!("Waiting {} ms...", sleep_msecs);
+            info!("Waiting {} ms...", sleep_msecs);
             sentry::add_breadcrumb(Breadcrumb {
                 category: Some(String::from("network")),
                 message: Some(format!("Waiting for {} ms", sleep_msecs)),
@@ -72,23 +73,23 @@ impl TwitterClient {
                     };
 
                     if err.is_connect() {
-                        eprintln!("Failed to connect: {}", err);
+                        error!("Failed to connect: {}", err);
                         sentry::capture_error(&err);
                         return Err(BackoffType::Network);
                     }
                     if let Some(status) = err.status() {
                         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                            eprintln!("Request is ratelimited");
+                            error!("Request is ratelimited");
                             sentry::capture_message("Request is ratelimited", sentry::Level::Warning);
                             return Err(BackoffType::Ratelimit);
                         } else if status.is_server_error() {
-                            eprintln!("Server side error: {}", err);
+                            error!("Server side error: {}", err);
                             sentry::capture_error(&err);
                             return Err(BackoffType::Server);
                         }
                     }
 
-                    eprintln!("Unknown error: {}", err);
+                    error!("Unknown error: {}", err);
                     sentry::capture_error(&err);
                     Err(BackoffType::Server)
                 },

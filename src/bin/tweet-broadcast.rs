@@ -4,6 +4,8 @@ use tweet_broadcast::{tweet::TwitterClient, Router};
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
+
     let token = std::env::var("TWITTER_APP_TOKEN").expect("TWITTER_APP_TOKEN not found or invalid");
     let cache_dir = std::env::var_os("TWITTER_CACHE")
         .or_else(|| {

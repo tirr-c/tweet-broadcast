@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt, TryFutureExt};
+use log::{error, info};
 use sentry::Breadcrumb;
 
 use crate::{Error, Router};
@@ -147,7 +148,7 @@ pub async fn run_line_loop(
         let line_result = match lines.next().await {
             Some(line_result) => line_result,
             None => {
-                eprintln!("Stream closed");
+                info!("Stream closed");
                 sentry::capture_message("Stream closed", sentry::Level::Info);
                 return Err(Error::StreamClosed);
             },
@@ -155,21 +156,21 @@ pub async fn run_line_loop(
 
         let mut line = match line_result {
             Ok(model::TwitterResponse::Error(e)) => {
-                eprintln!("Twitter error: {}", e);
+                error!("Twitter error: {}", e);
                 sentry::capture_error(&e);
                 return Err(e.into());
             }
             Ok(model::TwitterResponse::Ok(line)) => line,
             Err(Error::Parse(e)) => {
-                eprintln!("Parse error: {}", e);
-                eprintln!("  while parsing: {}", e.string());
+                error!("Parse error: {}", e);
+                error!("  while parsing: {}", e.string());
                 let mut ev = sentry::event_from_error(&e);
                 ev.extra.insert(String::from("message"), e.string().into());
                 sentry::capture_event(ev);
                 continue;
             }
             Err(e) => {
-                eprintln!("Stream error: {}", e);
+                error!("Stream error: {}", e);
                 sentry::capture_error(&e);
                 return Err(e.into());
             }
@@ -209,11 +210,11 @@ pub async fn run_line_loop(
                     line.augment(t);
                 }
                 Ok(model::TwitterResponse::Error(e)) => {
-                    eprintln!("Failed to retrieve original tweet: {}", e);
+                    error!("Failed to retrieve original tweet: {}", e);
                     sentry::capture_error(&e);
                 }
                 Err(e) => {
-                    eprintln!("Failed to retrieve original tweet: {}", e);
+                    error!("Failed to retrieve original tweet: {}", e);
                     sentry::capture_error(&e);
                 }
             }
@@ -222,8 +223,8 @@ pub async fn run_line_loop(
         let route_result = match router.call(&line, cache_dir).await {
             Ok(route_result) => route_result,
             Err(e) => {
-                eprintln!("Failed to route: {}", e);
-                eprintln!("Input: {:#?}", line);
+                error!("Failed to route: {}", e);
+                error!("Input: {:#?}", line);
                 let mut ev = sentry::event_from_error(&e);
                 ev.extra
                     .insert(String::from("data"), format!("{:?}", line).into());
@@ -259,7 +260,7 @@ pub async fn run_line_loop(
         } else {
             if !cached {
                 if let Err(e) = route_result.save_cache(cache_dir).await {
-                    eprintln!("Failed to save metadata: {}", e);
+                    error!("Failed to save metadata: {}", e);
                     sentry::capture_error(&e);
                 }
             }
@@ -277,13 +278,13 @@ pub async fn run_line_loop(
                         .await;
                     match result {
                         Err(e) => {
-                            eprintln!("Failed to send: {}", e);
+                            error!("Failed to send: {}", e);
                             sentry::capture_error(&e);
                         }
                         Ok(resp) => {
                             if !resp.status().is_success() {
                                 let resp = resp.text().await.unwrap();
-                                eprintln!("Submission failed: {}", resp);
+                                error!("Submission failed: {}", resp);
                             }
                         }
                     }

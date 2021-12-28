@@ -13,7 +13,7 @@ impl std::fmt::Debug for Backoff {
 
 impl Backoff {
     fn default_backoff_fn(duration: std::time::Duration) -> BoxFuture<'static, ()> {
-        eprintln!("Waiting {} ms...", duration.as_millis());
+        log::info!("Waiting {} ms...", duration.as_millis());
         let sleep = tokio::time::sleep(duration);
         Box::pin(sleep)
     }
