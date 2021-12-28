@@ -94,6 +94,7 @@ impl TwitterClient {
                     Err(BackoffType::Server)
                 },
             ).await;
+            info!("Connected to filtered stream");
 
             stream::run_line_loop(
                 self.client.clone(),
