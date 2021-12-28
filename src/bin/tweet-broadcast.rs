@@ -39,25 +39,31 @@ async fn main() {
     let mut sigquit =
         unix_signal::signal(unix_signal::SignalKind::quit()).expect("Failed to listen SIGQUIT");
 
-    let sigterm = sigterm.recv();
-    futures_util::pin_mut!(sigterm);
-    let sigint = sigint.recv();
-    futures_util::pin_mut!(sigint);
-    let sigquit = sigquit.recv();
-    futures_util::pin_mut!(sigquit);
-    let sig = futures_util::future::select_all([sigterm, sigint, sigquit]);
+    let local_set = tokio::task::LocalSet::new();
 
     let stream_handle = {
         let client = client.clone();
-        tokio::task::spawn_local(async move {
+        local_set.spawn_local(async move {
             let mut router = Router::new(128 * 1024 * 1024).expect("Failed to load router");
             loop {
                 client.run_stream(&mut router).await.err();
             }
         })
     };
-    sig.await;
 
-    stream_handle.abort();
-    stream_handle.await.err();
+    let sig_handle = tokio::spawn(async move {
+        let sigterm = sigterm.recv();
+        futures_util::pin_mut!(sigterm);
+        let sigint = sigint.recv();
+        futures_util::pin_mut!(sigint);
+        let sigquit = sigquit.recv();
+        futures_util::pin_mut!(sigquit);
+
+        futures_util::future::select_all([sigterm, sigint, sigquit]).await;
+        stream_handle.abort();
+        stream_handle.await.err();
+    });
+
+    local_set.await;
+    sig_handle.await.ok();
 }
