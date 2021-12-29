@@ -90,6 +90,7 @@ fn make_stream(
                 }
             }
         }
+        drop(resp);
     }
 }
 
