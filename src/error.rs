@@ -12,6 +12,12 @@ pub enum Error {
         #[source]
         std::io::Error,
     ),
+    #[error("error loading lists config: {0}")]
+    ListConfig(
+        #[from]
+        #[source]
+        toml::de::Error,
+    ),
     #[error("stream closed")]
     StreamClosed,
     #[error(transparent)]

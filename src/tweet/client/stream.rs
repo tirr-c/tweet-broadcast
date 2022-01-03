@@ -142,6 +142,8 @@ pub async fn run_line_loop(
     router: &mut Router,
 ) -> Result<std::convert::Infallible, Error>
 {
+    let discord_client = reqwest::Client::builder().build().unwrap();
+
     let lines = make_stream(resp);
     futures_util::pin_mut!(lines);
 
@@ -208,7 +210,7 @@ pub async fn run_line_loop(
             let tweet = retrieve_single(client.clone(), real_tweet.id()).await;
             match tweet {
                 Ok(model::TwitterResponse::Ok(t)) => {
-                    line.augment(t);
+                    line.merge_in_place(t, |_, _| {});
                 }
                 Ok(model::TwitterResponse::Error(e)) => {
                     error!("Failed to retrieve original tweet: {}", e);
@@ -267,7 +269,7 @@ pub async fn run_line_loop(
             }
 
             for route in routes {
-                let client = client.clone();
+                let client = discord_client.clone();
                 let url = route.url.clone();
                 let payload = serde_json::to_vec(&route.payload).unwrap();
                 tokio::spawn(async move {

@@ -10,6 +10,7 @@ use sentry::Breadcrumb;
 
 use crate::{Backoff, BackoffType, Router};
 
+mod list;
 mod stream;
 use stream::connect_once;
 
@@ -102,6 +103,32 @@ impl TwitterClient {
                 resp,
                 router,
             ).await.err();
+        }
+    }
+
+    pub async fn run_list_loop(&self) -> Result<std::convert::Infallible, crate::Error> {
+        use futures_util::StreamExt;
+
+        let config = list::ListsConfig::from_cache_dir(&self.cache_dir).await?;
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
+        log::info!("Started list fetch loop");
+        loop {
+            timer.tick().await;
+            log::debug!("Running list fetch");
+
+            let stream = config.run_once(&self.client, &self.cache_dir);
+            futures_util::pin_mut!(stream);
+
+            while let Some((id, ret)) = stream.next().await {
+                if let Err(e) = ret {
+                    log::error!("List fetch for {} failed: {}", id, e);
+                    let mut event = sentry::event_from_error(&e);
+                    event.tags.insert(String::from("id"), id);
+                    sentry::capture_event(event);
+                } else {
+                    log::debug!("List fetch for {} successful", id);
+                }
+            }
         }
     }
 }

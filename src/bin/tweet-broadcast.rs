@@ -50,6 +50,14 @@ async fn main() {
             }
         })
     };
+    let list_handle = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            loop {
+                client.run_list_loop().await.err();
+            }
+        })
+    };
 
     let sig_handle = tokio::spawn(async move {
         let sigterm = sigterm.recv();
@@ -61,7 +69,9 @@ async fn main() {
 
         futures_util::future::select_all([sigterm, sigint, sigquit]).await;
         stream_handle.abort();
+        list_handle.abort();
         stream_handle.await.err();
+        list_handle.await.err();
     });
 
     local_set.await;

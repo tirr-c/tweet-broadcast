@@ -213,17 +213,44 @@ impl Media {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ResponseItem<Data> {
+pub struct ResponseItem<Data, Meta = ()> {
     data: Data,
     #[serde(default)]
     includes: ResponseIncludes,
     matching_rules: Option<Vec<MatchingRule>>,
     errors: Option<Vec<TwitterError>>,
+    meta: Meta,
 }
 
-impl<Data> ResponseItem<Data> {
+impl<Data, Meta> ResponseItem<Data, Meta> {
     pub fn data(&self) -> &Data {
         &self.data
+    }
+
+    pub fn data_mut(&mut self) -> &mut Data {
+        &mut self.data
+    }
+
+    pub fn meta(&self) -> &Meta {
+        &self.meta
+    }
+
+    pub fn take_meta(self) -> (ResponseItem<Data, ()>, Meta) {
+        let Self {
+            data,
+            includes,
+            matching_rules,
+            errors,
+            meta,
+        } = self;
+        let new_item = ResponseItem {
+            data,
+            includes,
+            matching_rules,
+            errors,
+            meta: (),
+        };
+        (new_item, meta)
     }
 
     pub fn includes(&self) -> &ResponseIncludes {
@@ -237,11 +264,166 @@ impl<Data> ResponseItem<Data> {
     pub fn errors(&self) -> &[TwitterError] {
         self.errors.as_deref().unwrap_or(&[])
     }
+}
 
-    pub fn augment<Other>(&mut self, other: ResponseItem<Other>) {
-        self.includes.tweets.extend(other.includes.tweets);
-        self.includes.users.extend(other.includes.users);
-        self.includes.media.extend(other.includes.media);
+impl<Data, Meta> ResponseItem<Data, Meta> {
+    pub fn as_view(&self) -> ResponseItemRef<'_, &Data, Data, Meta> {
+        ResponseItemRef {
+            view: &self.data,
+            base: self,
+        }
+    }
+
+    pub fn map<NewData>(self, f: impl FnOnce(Data) -> NewData) -> ResponseItem<NewData, Meta> {
+        let Self {
+            data,
+            includes,
+            matching_rules,
+            errors,
+            meta,
+        } = self;
+
+        ResponseItem {
+            data: f(data),
+            includes,
+            matching_rules,
+            errors,
+            meta,
+        }
+    }
+
+    pub fn merge<OtherData, OtherMeta, NewData>(
+        self,
+        other: ResponseItem<OtherData, OtherMeta>,
+        merge_f: impl FnOnce(Data, OtherData) -> NewData,
+    ) -> ResponseItem<NewData, Meta>
+    {
+        let Self {
+            data,
+            mut includes,
+            matching_rules,
+            errors,
+            meta,
+        } = self;
+        includes.augment(other.includes);
+        let matching_rules = match (matching_rules, other.matching_rules) {
+            (None, None) => None,
+            (Some(v), None) | (None, Some(v)) => Some(v),
+            (Some(mut v1), Some(v2)) => {
+                v1.extend(v2);
+                Some(v1)
+            },
+        };
+        let errors = match (errors, other.errors) {
+            (None, None) => None,
+            (Some(v), None) | (None, Some(v)) => Some(v),
+            (Some(mut v1), Some(v2)) => {
+                v1.extend(v2);
+                Some(v1)
+            },
+        };
+
+        ResponseItem {
+            data: merge_f(data, other.data),
+            includes,
+            matching_rules,
+            errors,
+            meta,
+        }
+    }
+
+    pub fn merge_in_place<OtherData, OtherMeta>(
+        &mut self,
+        other: ResponseItem<OtherData, OtherMeta>,
+        merge_f: impl FnOnce(&mut Data, OtherData),
+    ) -> &mut Self
+    {
+        self.includes.augment(other.includes);
+        match (&mut self.matching_rules, other.matching_rules) {
+            (matching_rules @ None, other_matching_rules) => {
+                *matching_rules = other_matching_rules;
+            }
+            (Some(rules), Some(other_rules)) => {
+                rules.extend(other_rules);
+            }
+            _ => {}
+        }
+        match (&mut self.errors, other.errors) {
+            (errors @ None, other_errors) => {
+                *errors = other_errors;
+            }
+            (Some(e), Some(other_e)) => {
+                e.extend(other_e);
+            }
+            _ => {}
+        }
+        merge_f(&mut self.data, other.data);
+        self
+    }
+
+    pub fn augment<OtherData, OtherMeta>(
+        &mut self,
+        other: ResponseItem<OtherData, OtherMeta>,
+    ) -> &mut Self
+    {
+        self.merge_in_place(other, |_, _| {})
+    }
+}
+
+#[derive(Debug)]
+pub struct ResponseItemRef<'a, ViewData: 'a, Data, Meta> {
+    view: ViewData,
+    base: &'a ResponseItem<Data, Meta>,
+}
+
+impl<'a, ViewData: 'a, Data, Meta> ResponseItemRef<'a, ViewData, Data, Meta> {
+    pub fn view_data(&self) -> &ViewData {
+        &self.view
+    }
+
+    pub fn view_data_mut(&mut self) -> &mut ViewData {
+        &mut self.view
+    }
+
+    pub fn map<NewViewData: 'a>(
+        self,
+        f: impl FnOnce(ViewData) -> NewViewData,
+    ) -> ResponseItemRef<'a, NewViewData, Data, Meta>
+    {
+        ResponseItemRef {
+            view: f(self.view),
+            base: self.base,
+        }
+    }
+
+    pub fn ref_map<NewViewData: 'a>(
+        &self,
+        f: impl FnOnce(&ViewData) -> NewViewData,
+    ) -> ResponseItemRef<'a, NewViewData, Data, Meta>
+    {
+        ResponseItemRef {
+            view: f(&self.view),
+            base: self.base,
+        }
+    }
+
+    pub fn ref_mut_map<NewViewData: 'a>(
+        &mut self,
+        f: impl FnOnce(&mut ViewData) -> NewViewData,
+    ) -> ResponseItemRef<'a, NewViewData, Data, Meta>
+    {
+        ResponseItemRef {
+            view: f(&mut self.view),
+            base: self.base,
+        }
+    }
+}
+
+impl<'a, ViewData: 'a, Data, Meta> std::ops::Deref for ResponseItemRef<'a, ViewData, Data, Meta> {
+    type Target = ResponseItem<Data, Meta>;
+
+    fn deref(&self) -> &Self::Target {
+        self.base
     }
 }
 
@@ -265,6 +447,12 @@ impl ResponseIncludes {
     pub fn get_user(&self, id: &str) -> Option<&User> {
         self.users.iter().find(|u| u.id == id)
     }
+
+    pub fn augment(&mut self, other: Self) {
+        self.tweets.extend(other.tweets);
+        self.users.extend(other.users);
+        self.media.extend(other.media);
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -280,6 +468,27 @@ impl MatchingRule {
 
     pub fn tag(&self) -> &str {
         &self.tag
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListMeta {
+    result_count: i32,
+    previous_token: Option<String>,
+    next_token: Option<String>,
+}
+
+impl ListMeta {
+    pub fn result_count(&self) -> i32 {
+        self.result_count
+    }
+
+    pub fn previous_token(&self) -> Option<&str> {
+        self.previous_token.as_deref()
+    }
+
+    pub fn next_token(&self) -> Option<&str> {
+        self.next_token.as_deref()
     }
 }
 
@@ -300,7 +509,7 @@ pub struct ResponseError {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum TwitterResponse<Data> {
+pub enum TwitterResponse<Data, Meta = ()> {
     Error(ResponseError),
-    Ok(ResponseItem<Data>),
+    Ok(ResponseItem<Data, Meta>),
 }
