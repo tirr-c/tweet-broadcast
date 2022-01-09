@@ -111,17 +111,19 @@ impl TwitterClient {
 
         let config = list::ListsConfig::from_cache_dir(&self.cache_dir).await?;
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
-        log::info!("Started list fetch loop");
+        info!("Started list fetch loop");
+
+        let mut catchup = true;
         loop {
             timer.tick().await;
-            log::debug!("Running list fetch");
+            log::debug!("Running list fetch{}", if catchup { " (catch-up)" } else { "" });
 
-            let stream = config.run_once(&self.client, &self.cache_dir);
+            let stream = config.run_once(&self.client, &self.cache_dir, catchup);
             futures_util::pin_mut!(stream);
 
             while let Some((id, ret)) = stream.next().await {
                 if let Err(e) = ret {
-                    log::error!("List fetch for {} failed: {}", id, e);
+                    error!("List fetch for {} failed: {}", id, e);
                     let mut event = sentry::event_from_error(&e);
                     event.tags.insert(String::from("id"), id);
                     sentry::capture_event(event);
@@ -129,6 +131,8 @@ impl TwitterClient {
                     log::debug!("List fetch for {} successful", id);
                 }
             }
+
+            catchup = false;
         }
     }
 }

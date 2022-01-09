@@ -94,47 +94,6 @@ fn make_stream(
     }
 }
 
-async fn retrieve_single(
-    client: reqwest::Client,
-    id: &str,
-) -> Result<model::TwitterResponse<model::Tweet>, Error> {
-    const TWEET_ENDPOINT: &'static str = "https://api.twitter.com/2/tweets";
-    let mut url = TWEET_ENDPOINT.parse::<reqwest::Url>().unwrap();
-    url.path_segments_mut().unwrap().push(id);
-    url.query_pairs_mut()
-        .append_pair(
-            "expansions",
-            concat_param!["author_id", "attachments.media_keys"],
-        )
-        .append_pair(
-            "tweet.fields",
-            concat_param![
-                "created_at",
-                "entities",
-                "public_metrics",
-                "possibly_sensitive"
-            ],
-        )
-        .append_pair(
-            "user.fields",
-            concat_param!["profile_image_url", "public_metrics"],
-        )
-        .append_pair(
-            "media.fields",
-            concat_param!["width", "height", "url", "preview_image_url"],
-        )
-        .finish();
-
-    let resp = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?;
-
-    let resp = resp.json::<model::TwitterResponse<model::Tweet>>().await?;
-    Ok(resp)
-}
-
 pub async fn run_line_loop(
     client: reqwest::Client,
     cache_dir: &std::path::Path,
@@ -179,49 +138,17 @@ pub async fn run_line_loop(
             }
         };
 
-        let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
-            line.includes().get_tweet(rt_id).unwrap()
-        } else {
-            line.data()
-        };
-
-        // check media first
-        let media_keys = real_tweet.media_keys();
-        let key_count = media_keys.len();
-        let media = media_keys
-            .iter()
-            .filter_map(|k| line.includes().get_media(k))
-            .collect::<Vec<_>>();
-
-        if key_count != media.len() {
-            // retrieve tweet again
-            sentry::add_breadcrumb(Breadcrumb {
-                category: Some(String::from("tweet")),
-                message: Some(String::from("Media info missing, fetching tweet info")),
-                level: sentry::Level::Info,
-                data: [
-                    (String::from("id"), line.data().id().into()),
-                    (String::from("referenced_tweet_id"), real_tweet.id().into()),
-                ]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            });
-            let tweet = retrieve_single(client.clone(), real_tweet.id()).await;
-            match tweet {
-                Ok(model::TwitterResponse::Ok(t)) => {
-                    line.merge_in_place(t, |_, _| {});
-                }
-                Ok(model::TwitterResponse::Error(e)) => {
-                    error!("Failed to retrieve original tweet: {}", e);
-                    sentry::capture_error(&e);
-                }
-                Err(e) => {
-                    error!("Failed to retrieve original tweet: {}", e);
-                    sentry::capture_error(&e);
-                }
+        match crate::tweet::util::load_augment_data(&client, line.as_view()).await {
+            Ok(Some(augment_data)) => {
+                line.augment(augment_data);
             }
-        }
+            Ok(_) => {}
+            Err(e) => {
+                error!("Failed to retrieve original tweet: {}", e);
+                sentry::capture_error(&e);
+                return Err(e);
+            }
+        };
 
         let route_result = match router.call(&line, cache_dir).await {
             Ok(route_result) => route_result,

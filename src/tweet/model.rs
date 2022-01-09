@@ -158,6 +158,16 @@ impl User {
         self.profile_image_url.as_ref()
     }
 
+    pub fn profile_image_url_orig(&self) -> Option<Url> {
+        self.profile_image_url.as_ref().map(|url| {
+            let mut url = url.clone();
+            let filename = url.path_segments().unwrap().last().unwrap();
+            let new_filename = filename.replace("_normal.", ".");
+            url.path_segments_mut().unwrap().pop().push(&new_filename);
+            url
+        })
+    }
+
     pub fn metrics(&self) -> Option<&UserPublicMetrics> {
         self.public_metrics.as_ref()
     }
@@ -210,10 +220,22 @@ impl Media {
     pub fn url(&self) -> Option<&Url> {
         self.url.as_ref().or(self.preview_image_url.as_ref())
     }
+
+    pub fn url_orig(&self) -> Option<Url> {
+        if let Some(url) = &self.url {
+            let mut url = url.clone();
+            url.set_query(Some("name=orig"));
+            Some(url)
+        } else if let Some(url) = &self.preview_image_url {
+            Some(url.clone())
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ResponseItem<Data, Meta = ()> {
+pub struct ResponseItem<Data, Meta = Option<()>> {
     data: Data,
     #[serde(default)]
     includes: ResponseIncludes,
@@ -235,7 +257,7 @@ impl<Data, Meta> ResponseItem<Data, Meta> {
         &self.meta
     }
 
-    pub fn take_meta(self) -> (ResponseItem<Data, ()>, Meta) {
+    pub fn take_meta(self) -> (ResponseItem<Data>, Meta) {
         let Self {
             data,
             includes,
@@ -248,7 +270,7 @@ impl<Data, Meta> ResponseItem<Data, Meta> {
             includes,
             matching_rules,
             errors,
-            meta: (),
+            meta: None,
         };
         (new_item, meta)
     }
@@ -375,6 +397,14 @@ pub struct ResponseItemRef<'a, ViewData: 'a, Data, Meta> {
     view: ViewData,
     base: &'a ResponseItem<Data, Meta>,
 }
+
+impl<'a, ViewData: Clone + 'a, Data, Meta> Clone for ResponseItemRef<'a, ViewData, Data, Meta> {
+    fn clone(&self) -> Self {
+        Self { view: self.view.clone(), base: self.base }
+    }
+}
+
+impl<'a, ViewData: Copy + 'a, Data, Meta> Copy for ResponseItemRef<'a, ViewData, Data, Meta> {}
 
 impl<'a, ViewData: 'a, Data, Meta> ResponseItemRef<'a, ViewData, Data, Meta> {
     pub fn view_data(&self) -> &ViewData {
@@ -509,7 +539,7 @@ pub struct ResponseError {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum TwitterResponse<Data, Meta = ()> {
+pub enum TwitterResponse<Data, Meta = Option<()>> {
     Error(ResponseError),
     Ok(ResponseItem<Data, Meta>),
 }

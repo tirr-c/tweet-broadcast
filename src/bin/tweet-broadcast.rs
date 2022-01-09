@@ -53,9 +53,8 @@ async fn main() {
     let list_handle = {
         let client = client.clone();
         tokio::spawn(async move {
-            loop {
-                client.run_list_loop().await.err();
-            }
+            let e = client.run_list_loop().await.unwrap_err();
+            log::error!("List error: {}", e);
         })
     };
 

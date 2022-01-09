@@ -5,7 +5,7 @@ use futures_util::{FutureExt, Stream};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    tweet::{concat_param, model},
+    tweet::{concat_param, model, util},
     Error,
 };
 
@@ -22,7 +22,7 @@ pub struct ListMeta {
 impl ListsConfig {
     pub async fn from_cache_dir(cache_dir: impl AsRef<Path>) -> Result<Self, Error> {
         let cache_dir = cache_dir.as_ref();
-        let data = tokio::fs::read(cache_dir.join("list/config.toml")).await?;
+        let data = tokio::fs::read(cache_dir.join("lists/config.toml")).await?;
         let config = toml::from_slice::<ListsConfig>(&data)?;
         Ok(config)
     }
@@ -30,7 +30,7 @@ impl ListsConfig {
     #[allow(dead_code)]
     pub async fn save_cache(&self, cache_dir: impl AsRef<Path>) -> Result<(), Error> {
         let cache_dir = cache_dir.as_ref();
-        let path = cache_dir.join("list/config.toml");
+        let path = cache_dir.join("lists/config.toml");
         let data = toml::to_vec(self).unwrap();
         tokio::fs::write(path, data).await?;
         Ok(())
@@ -38,7 +38,13 @@ impl ListsConfig {
 }
 
 impl ListsConfig {
-    pub fn run_once(&self, client: &reqwest::Client, cache_dir: impl AsRef<Path>) -> impl Stream<Item = (String, Result<(), Error>)> {
+    pub fn run_once(
+        &self,
+        client: &reqwest::Client,
+        cache_dir: impl AsRef<Path>,
+        catchup: bool,
+    ) -> impl Stream<Item = (String, Result<(), Error>)>
+    {
         use futures_util::TryStreamExt;
 
         let cache_dir = cache_dir.as_ref();
@@ -54,22 +60,49 @@ impl ListsConfig {
             let webhook_client = webhook_client.clone();
             lists_fut.push(async move {
                 let mut head = ListHead::from_cache_dir(list_id, &cache_dir).await?;
-                let tweets = head.load_and_update(client).await?;
+                let first_time = head.head.is_none();
+
+                let mut tweets = head.load_and_update(&client, catchup).await?;
+
+                // augment
+                if !first_time && (!catchup || tweets.data().len() <= 5) {
+                    let augment_data = util::load_batch_augment_data(&client, tweets.as_view().map(|v| &**v)).await?;
+                    if let Some(augment_data) = augment_data {
+                        tweets.augment(augment_data);
+                    }
+                }
+
+                // split into views
+                let mut tweets_view = tweets.as_view().map(|v| v.iter());
+                let mut tweet_views = Vec::new();
                 let webhooks_fut = futures_util::stream::FuturesUnordered::new();
 
+                loop {
+                    let tweet_view = tweets_view.ref_mut_map(|view| view.next());
+                    let tweet_view = if let Some(&tweet) = tweet_view.view_data().as_ref() {
+                        tweet_view.map(|_| tweet)
+                    } else {
+                        break;
+                    };
+                    tweet_views.push(tweet_view);
+                }
+
+                // execute webhooks
                 for webhook in webhooks {
-                    let tweets_view = tweets.as_view();
                     let webhook_client = webhook_client.clone();
+                    let tweet_views = &tweet_views;
+                    let list_id = &head.id;
+
                     webhooks_fut.push(async move {
-                        let mut tweets_view = tweets_view.map(|v| v.iter());
-                        loop {
-                            let tweet_view = tweets_view.ref_mut_map(|view| view.next());
-                            let tweet_view = if let Some(&tweet) = tweet_view.view_data().as_ref() {
-                                tweet_view.map(|_| tweet)
-                            } else {
-                                break;
-                            };
-                            send_webhook(webhook_client.clone(), webhook.clone(), tweet_view).await?;
+                        if catchup && tweet_views.len() > 5 {
+                            send_catchup_webhook(webhook_client, webhook, list_id, tweet_views.len()).await?;
+                        } else if first_time {
+                            send_first_time_webhook(webhook_client, webhook, list_id).await?;
+                        } else {
+                            for &tweet_view in tweet_views {
+                                send_webhook(webhook_client.clone(), webhook.clone(), tweet_view).await?;
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
                         }
                         Ok::<_, crate::Error>(())
                     });
@@ -82,6 +115,43 @@ impl ListsConfig {
         }
         lists_fut
     }
+}
+
+async fn send_first_time_webhook(
+    client: reqwest::Client,
+    webhook_url: reqwest::Url,
+    list_id: &str,
+) -> Result<(), crate::Error>
+{
+    let message = format!(
+        "List `{}` initialized",
+        list_id,
+    );
+    let payload = serde_json::json!({
+        "username": "tweet-broadcast",
+        "content": message,
+    });
+
+    execute_webhook(&client, &webhook_url, &payload).await
+}
+
+async fn send_catchup_webhook(
+    client: reqwest::Client,
+    webhook_url: reqwest::Url,
+    list_id: &str,
+    tweet_count: usize,
+) -> Result<(), crate::Error>
+{
+    let message = format!(
+        "Skipping {} tweet{} of list `{}` during list catch-up",
+        tweet_count, if tweet_count == 1 { "" } else { "s" }, list_id,
+    );
+    let payload = serde_json::json!({
+        "username": "tweet-broadcast",
+        "content": message,
+    });
+
+    execute_webhook(&client, &webhook_url, &payload).await
 }
 
 async fn send_webhook<'a, Data, Meta>(
@@ -109,7 +179,7 @@ async fn send_webhook<'a, Data, Meta>(
         .map(|key| {
             let media = tweet.includes().get_media(key).unwrap();
             serde_json::json!({
-                "url": media.url(),
+                "url": media.url_orig(),
                 "width": media.width(),
                 "height": media.height(),
             })
@@ -120,7 +190,7 @@ async fn send_webhook<'a, Data, Meta>(
         "author": {
             "name": format!("{} (@{})", author.name(), author.username()),
             "url": format!("https://twitter.com/{}", author.username()),
-            "icon_url": author.profile_image_url(),
+            "icon_url": author.profile_image_url_orig(),
         },
         "description": tweet_data.unescaped_text(),
         "timestamp": tweet_data.created_at(),
@@ -132,21 +202,50 @@ async fn send_webhook<'a, Data, Meta>(
         },
         "image": payload_media.first(),
     })];
-    payload_embed.extend(payload_media.into_iter().skip(1));
+    payload_embed.extend(payload_media.into_iter().map(|v| serde_json::json!({ "image": v })).skip(1));
 
     let payload = serde_json::json!({
         "username": format!("{} (@{})", original_author.name(), original_author.username()),
-        "avatar_url": original_author.profile_image_url().map(|url| url.to_string()).unwrap_or_else(String::new),
+        "avatar_url": original_author.profile_image_url_orig(),
         "content": format!("https://twitter.com/{}/status/{}", author.username(), tweet_data.id()),
         "embeds": payload_embed,
     });
-    client
-        .post(webhook_url)
-        .json(&payload)
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(())
+
+    execute_webhook(&client, &webhook_url, &payload).await
+}
+
+async fn execute_webhook(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    payload: &serde_json::Value,
+) -> Result<(), crate::Error>
+{
+    loop {
+        log::trace!("Sending payload {}", serde_json::to_string(payload).unwrap());
+        let resp = client
+            .post(url.clone())
+            .query(&[("wait", "true")])
+            .json(payload)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let duration = if let Some(reset_after) = resp.headers().get("x-ratelimit-reset-after") {
+                let reset_after = reset_after.to_str().unwrap().parse::<f32>().unwrap();
+                std::time::Duration::from_secs_f32(reset_after)
+            } else if let Some(retry_after) = resp.headers().get(reqwest::header::RETRY_AFTER) {
+                let retry_after = retry_after.to_str().unwrap().parse::<u64>().unwrap();
+                std::time::Duration::from_secs(retry_after)
+            } else {
+                std::time::Duration::from_secs(5)
+            };
+            log::debug!("Webhook is ratelimited, retrying after {:?}", duration);
+            tokio::time::sleep(duration).await;
+        } else {
+            resp.error_for_status()?;
+            return Ok(());
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -158,7 +257,7 @@ struct ListHead {
 impl ListHead {
     async fn from_cache_dir(id: String, cache_dir: impl AsRef<Path>) -> Result<Self, Error> {
         let cache_dir = cache_dir.as_ref();
-        let head = tokio::fs::read_to_string(cache_dir.join(format!("list/{}", id))).await;
+        let head = tokio::fs::read_to_string(cache_dir.join(format!("lists/{}", id))).await;
         let head = match head {
             Ok(head) => Some(head),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -169,7 +268,7 @@ impl ListHead {
 
     async fn save_cache(&self, cache_dir: impl AsRef<Path>) -> Result<(), Error> {
         let cache_dir = cache_dir.as_ref();
-        let path = cache_dir.join(format!("list/{}", self.id));
+        let path = cache_dir.join(format!("lists/{}", self.id));
         if let Some(head) = &self.head {
             tokio::fs::write(path, head.as_bytes()).await?;
         } else {
@@ -186,11 +285,13 @@ impl ListHead {
 impl ListHead {
     async fn load_and_update(
         &mut self,
-        client: reqwest::Client,
+        client: &reqwest::Client,
+        catchup: bool,
     ) -> Result<model::ResponseItem<Vec<model::Tweet>>, Error>
     {
-        let result = load_list_since(client, self).await?;
+        let result = load_list_since(client, self, catchup).await?;
         if let Some(last_tweet) = result.data().last() {
+            log::debug!("List {}: {} new tweet(s), last tweet ID is {}", self.id, result.data().len(), last_tweet.id());
             self.head = Some(last_tweet.id().to_owned());
         }
         Ok(result)
@@ -236,13 +337,22 @@ fn create_endpoint_url(id: &str, max_results: u32, pagination_token: Option<&str
 }
 
 async fn load_list_since(
-    client: reqwest::Client,
+    client: &reqwest::Client,
     list: &ListHead,
+    catchup: bool,
 ) -> Result<model::ResponseItem<Vec<model::Tweet>>, Error>
 {
     let list_id = &list.id;
     let since_id = list.head.as_deref();
-    let max_results = if since_id.is_some() { 20 } else { 1 };
+    let max_results = if since_id.is_some() {
+        if catchup {
+            100
+        } else {
+            10
+        }
+    } else {
+        1
+    };
 
     let make_request = |token: Option<String>| {
         let url = create_endpoint_url(list_id, max_results, token.as_deref());
@@ -260,32 +370,40 @@ async fn load_list_since(
         }
     };
 
-    let (mut base_ret, mut meta) = make_request(None).await?;
-    let since_id = if let Some(since_id) = since_id {
-        since_id
-    } else {
-        return Ok(base_ret);
-    };
+    let mut ret = async {
+        let (mut base_ret, mut meta) = make_request(None).await?;
+        let since_id = if let Some(since_id) = since_id {
+            since_id
+        } else {
+            return Ok(base_ret);
+        };
 
-    let item_len = base_ret.data().len();
-    base_ret.data_mut().retain(|item| item.id() > since_id);
-    if item_len != base_ret.data().len() {
-        return Ok(base_ret);
-    }
-
-    while let Some(token) = meta.next_token() {
-        let (mut ret, next_meta) = make_request(Some(token.to_owned())).await?;
-
-        let item_len = ret.data().len();
-        ret.data_mut().retain(|item| item.id() > since_id);
-        if item_len != ret.data().len() {
-            break;
+        let item_len = base_ret.data().len();
+        base_ret.data_mut().retain(|item| item.id() > since_id);
+        if item_len != base_ret.data().len() {
+            return Ok(base_ret);
         }
-        base_ret.merge_in_place(ret, |base, v| base.extend(v));
 
-        meta = next_meta;
-    }
+        while let Some(token) = meta.next_token() {
+            if base_ret.data().len() >= 500 {
+                break;
+            }
 
-    base_ret.data_mut().reverse();
-    Ok(base_ret)
+            let (mut ret, next_meta) = make_request(Some(token.to_owned())).await?;
+
+            let item_len = ret.data().len();
+            ret.data_mut().retain(|item| item.id() > since_id);
+            if item_len != ret.data().len() {
+                break;
+            }
+            base_ret.merge_in_place(ret, |base, v| base.extend(v));
+
+            meta = next_meta;
+        }
+
+        Ok::<_, crate::Error>(base_ret)
+    }.await?;
+
+    ret.data_mut().reverse();
+    Ok(ret)
 }
