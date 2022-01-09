@@ -43,8 +43,7 @@ impl ListsConfig {
         client: &reqwest::Client,
         cache_dir: impl AsRef<Path>,
         catchup: bool,
-    ) -> impl Stream<Item = (String, Result<(), Error>)>
-    {
+    ) -> impl Stream<Item = (String, Result<(), Error>)> {
         use futures_util::TryStreamExt;
 
         let cache_dir = cache_dir.as_ref();
@@ -58,60 +57,76 @@ impl ListsConfig {
             let client = client.clone();
             let webhooks = meta.webhooks.clone();
             let webhook_client = webhook_client.clone();
-            lists_fut.push(async move {
-                let mut head = ListHead::from_cache_dir(list_id, &cache_dir).await?;
-                let first_time = head.head.is_none();
+            lists_fut.push(
+                async move {
+                    let mut head = ListHead::from_cache_dir(list_id, &cache_dir).await?;
+                    let first_time = head.head.is_none();
 
-                let mut tweets = head.load_and_update(&client, catchup).await?;
+                    let mut tweets = head.load_and_update(&client, catchup).await?;
 
-                // augment
-                if !first_time && (!catchup || tweets.data().len() <= 5) {
-                    let augment_data = util::load_batch_augment_data(&client, tweets.as_view().map(|v| &**v)).await?;
-                    if let Some(augment_data) = augment_data {
-                        tweets.augment(augment_data);
-                    }
-                }
-
-                // split into views
-                let mut tweets_view = tweets.as_view().map(|v| v.iter());
-                let mut tweet_views = Vec::new();
-                let webhooks_fut = futures_util::stream::FuturesUnordered::new();
-
-                loop {
-                    let tweet_view = tweets_view.ref_mut_map(|view| view.next());
-                    let tweet_view = if let Some(&tweet) = tweet_view.view_data().as_ref() {
-                        tweet_view.map(|_| tweet)
-                    } else {
-                        break;
-                    };
-                    tweet_views.push(tweet_view);
-                }
-
-                // execute webhooks
-                for webhook in webhooks {
-                    let webhook_client = webhook_client.clone();
-                    let tweet_views = &tweet_views;
-                    let list_id = &head.id;
-
-                    webhooks_fut.push(async move {
-                        if catchup && tweet_views.len() > 5 {
-                            send_catchup_webhook(webhook_client, webhook, list_id, tweet_views.len()).await?;
-                        } else if first_time {
-                            send_first_time_webhook(webhook_client, webhook, list_id).await?;
-                        } else {
-                            for &tweet_view in tweet_views {
-                                send_webhook(webhook_client.clone(), webhook.clone(), tweet_view).await?;
-                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                            }
+                    // augment
+                    if !first_time && (!catchup || tweets.data().len() <= 5) {
+                        let augment_data =
+                            util::load_batch_augment_data(&client, tweets.as_view().map(|v| &**v))
+                                .await?;
+                        if let Some(augment_data) = augment_data {
+                            tweets.augment(augment_data);
                         }
-                        Ok::<_, crate::Error>(())
-                    });
-                }
+                    }
 
-                webhooks_fut.try_collect::<()>().await?;
-                head.save_cache(&cache_dir).await?;
-                Ok(())
-            }.map(|ret| (id, ret)));
+                    // split into views
+                    let mut tweets_view = tweets.as_view().map(|v| v.iter());
+                    let mut tweet_views = Vec::new();
+                    let webhooks_fut = futures_util::stream::FuturesUnordered::new();
+
+                    loop {
+                        let tweet_view = tweets_view.ref_mut_map(|view| view.next());
+                        let tweet_view = if let Some(&tweet) = tweet_view.view_data().as_ref() {
+                            tweet_view.map(|_| tweet)
+                        } else {
+                            break;
+                        };
+                        tweet_views.push(tweet_view);
+                    }
+
+                    // execute webhooks
+                    for webhook in webhooks {
+                        let webhook_client = webhook_client.clone();
+                        let tweet_views = &tweet_views;
+                        let list_id = &head.id;
+
+                        webhooks_fut.push(async move {
+                            if catchup && tweet_views.len() > 5 {
+                                send_catchup_webhook(
+                                    webhook_client,
+                                    webhook,
+                                    list_id,
+                                    tweet_views.len(),
+                                )
+                                .await?;
+                            } else if first_time {
+                                send_first_time_webhook(webhook_client, webhook, list_id).await?;
+                            } else {
+                                for &tweet_view in tweet_views {
+                                    send_webhook(
+                                        webhook_client.clone(),
+                                        webhook.clone(),
+                                        tweet_view,
+                                    )
+                                    .await?;
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                }
+                            }
+                            Ok::<_, crate::Error>(())
+                        });
+                    }
+
+                    webhooks_fut.try_collect::<()>().await?;
+                    head.save_cache(&cache_dir).await?;
+                    Ok(())
+                }
+                .map(|ret| (id, ret)),
+            );
         }
         lists_fut
     }
@@ -121,12 +136,8 @@ async fn send_first_time_webhook(
     client: reqwest::Client,
     webhook_url: reqwest::Url,
     list_id: &str,
-) -> Result<(), crate::Error>
-{
-    let message = format!(
-        "List `{}` initialized",
-        list_id,
-    );
+) -> Result<(), crate::Error> {
+    let message = format!("List `{}` initialized", list_id,);
     let payload = serde_json::json!({
         "username": "tweet-broadcast",
         "content": message,
@@ -140,11 +151,12 @@ async fn send_catchup_webhook(
     webhook_url: reqwest::Url,
     list_id: &str,
     tweet_count: usize,
-) -> Result<(), crate::Error>
-{
+) -> Result<(), crate::Error> {
     let message = format!(
         "Skipping {} tweet{} of list `{}` during list catch-up",
-        tweet_count, if tweet_count == 1 { "" } else { "s" }, list_id,
+        tweet_count,
+        if tweet_count == 1 { "" } else { "s" },
+        list_id,
     );
     let payload = serde_json::json!({
         "username": "tweet-broadcast",
@@ -160,7 +172,10 @@ async fn send_webhook<'a, Data, Meta>(
     tweet: model::ResponseItemRef<'a, &'a model::Tweet, Data, Meta>,
 ) -> Result<(), crate::Error> {
     let original_tweet = *tweet.view_data();
-    let original_author = tweet.includes().get_user(original_tweet.author_id().unwrap()).unwrap();
+    let original_author = tweet
+        .includes()
+        .get_user(original_tweet.author_id().unwrap())
+        .unwrap();
 
     let tweet_data = original_tweet
         .referenced_tweets()
@@ -171,7 +186,10 @@ async fn send_webhook<'a, Data, Meta>(
     } else {
         original_tweet
     };
-    let author = tweet.includes().get_user(tweet_data.author_id().unwrap()).unwrap();
+    let author = tweet
+        .includes()
+        .get_user(tweet_data.author_id().unwrap())
+        .unwrap();
 
     let payload_media = tweet_data
         .media_keys()
@@ -202,7 +220,12 @@ async fn send_webhook<'a, Data, Meta>(
         },
         "image": payload_media.first(),
     })];
-    payload_embed.extend(payload_media.into_iter().map(|v| serde_json::json!({ "image": v })).skip(1));
+    payload_embed.extend(
+        payload_media
+            .into_iter()
+            .map(|v| serde_json::json!({ "image": v }))
+            .skip(1),
+    );
 
     let payload = serde_json::json!({
         "username": format!("{} (@{})", original_author.name(), original_author.username()),
@@ -218,10 +241,12 @@ async fn execute_webhook(
     client: &reqwest::Client,
     url: &reqwest::Url,
     payload: &serde_json::Value,
-) -> Result<(), crate::Error>
-{
+) -> Result<(), crate::Error> {
     loop {
-        log::trace!("Sending payload {}", serde_json::to_string(payload).unwrap());
+        log::trace!(
+            "Sending payload {}",
+            serde_json::to_string(payload).unwrap()
+        );
         let resp = client
             .post(url.clone())
             .query(&[("wait", "true")])
@@ -230,7 +255,8 @@ async fn execute_webhook(
             .await?;
 
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let duration = if let Some(reset_after) = resp.headers().get("x-ratelimit-reset-after") {
+            let duration = if let Some(reset_after) = resp.headers().get("x-ratelimit-reset-after")
+            {
                 let reset_after = reset_after.to_str().unwrap().parse::<f32>().unwrap();
                 std::time::Duration::from_secs_f32(reset_after)
             } else if let Some(retry_after) = resp.headers().get(reqwest::header::RETRY_AFTER) {
@@ -287,11 +313,15 @@ impl ListHead {
         &mut self,
         client: &reqwest::Client,
         catchup: bool,
-    ) -> Result<model::ResponseItem<Vec<model::Tweet>>, Error>
-    {
+    ) -> Result<model::ResponseItem<Vec<model::Tweet>>, Error> {
         let result = load_list_since(client, self, catchup).await?;
         if let Some(last_tweet) = result.data().last() {
-            log::debug!("List {}: {} new tweet(s), last tweet ID is {}", self.id, result.data().len(), last_tweet.id());
+            log::debug!(
+                "List {}: {} new tweet(s), last tweet ID is {}",
+                self.id,
+                result.data().len(),
+                last_tweet.id()
+            );
             self.head = Some(last_tweet.id().to_owned());
         }
         Ok(result)
@@ -299,12 +329,10 @@ impl ListHead {
 }
 
 fn create_endpoint_url(id: &str, max_results: u32, pagination_token: Option<&str>) -> reqwest::Url {
-    let mut url = reqwest::Url::parse(&format!("https://api.twitter.com/2/lists/{}/tweets", id)).unwrap();
+    let mut url =
+        reqwest::Url::parse(&format!("https://api.twitter.com/2/lists/{}/tweets", id)).unwrap();
     url.query_pairs_mut()
-        .append_pair(
-            "max_results",
-            &max_results.to_string(),
-        )
+        .append_pair("max_results", &max_results.to_string())
         .append_pair(
             "expansions",
             concat_param![
@@ -340,8 +368,7 @@ async fn load_list_since(
     client: &reqwest::Client,
     list: &ListHead,
     catchup: bool,
-) -> Result<model::ResponseItem<Vec<model::Tweet>>, Error>
-{
+) -> Result<model::ResponseItem<Vec<model::Tweet>>, Error> {
     let list_id = &list.id;
     let since_id = list.head.as_deref();
     let max_results = if since_id.is_some() {
@@ -357,7 +384,8 @@ async fn load_list_since(
     let make_request = |token: Option<String>| {
         let url = create_endpoint_url(list_id, max_results, token.as_deref());
         async {
-            let base_ret = client.get(url)
+            let base_ret = client
+                .get(url)
                 .send()
                 .await?
                 .json::<model::TwitterResponse<Vec<model::Tweet>, model::ListMeta>>()
@@ -402,7 +430,8 @@ async fn load_list_since(
         }
 
         Ok::<_, crate::Error>(base_ret)
-    }.await?;
+    }
+    .await?;
 
     ret.data_mut().reverse();
     Ok(ret)

@@ -24,11 +24,15 @@ impl Backoff {
         }
     }
 
-    pub fn backoff_fn(&mut self, f: impl FnMut(std::time::Duration) -> BoxFuture<'static, ()> + 'static) {
+    pub fn backoff_fn(
+        &mut self,
+        f: impl FnMut(std::time::Duration) -> BoxFuture<'static, ()> + 'static,
+    ) {
         self.backoff_fn = Box::new(f);
     }
 
-    pub async fn run_fn<Ret, Func, Fut>(&mut self, mut f: Func) -> Ret where
+    pub async fn run_fn<Ret, Func, Fut>(&mut self, mut f: Func) -> Ret
+    where
         Func: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<Ret, BackoffType>>,
     {

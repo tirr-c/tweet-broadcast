@@ -318,8 +318,7 @@ impl<Data, Meta> ResponseItem<Data, Meta> {
         self,
         other: ResponseItem<OtherData, OtherMeta>,
         merge_f: impl FnOnce(Data, OtherData) -> NewData,
-    ) -> ResponseItem<NewData, Meta>
-    {
+    ) -> ResponseItem<NewData, Meta> {
         let Self {
             data,
             mut includes,
@@ -334,7 +333,7 @@ impl<Data, Meta> ResponseItem<Data, Meta> {
             (Some(mut v1), Some(v2)) => {
                 v1.extend(v2);
                 Some(v1)
-            },
+            }
         };
         let errors = match (errors, other.errors) {
             (None, None) => None,
@@ -342,7 +341,7 @@ impl<Data, Meta> ResponseItem<Data, Meta> {
             (Some(mut v1), Some(v2)) => {
                 v1.extend(v2);
                 Some(v1)
-            },
+            }
         };
 
         ResponseItem {
@@ -358,8 +357,7 @@ impl<Data, Meta> ResponseItem<Data, Meta> {
         &mut self,
         other: ResponseItem<OtherData, OtherMeta>,
         merge_f: impl FnOnce(&mut Data, OtherData),
-    ) -> &mut Self
-    {
+    ) -> &mut Self {
         self.includes.augment(other.includes);
         match (&mut self.matching_rules, other.matching_rules) {
             (matching_rules @ None, other_matching_rules) => {
@@ -386,8 +384,7 @@ impl<Data, Meta> ResponseItem<Data, Meta> {
     pub fn augment<OtherData, OtherMeta>(
         &mut self,
         other: ResponseItem<OtherData, OtherMeta>,
-    ) -> &mut Self
-    {
+    ) -> &mut Self {
         self.merge_in_place(other, |_, _| {})
     }
 }
@@ -400,7 +397,10 @@ pub struct ResponseItemRef<'a, ViewData: 'a, Data, Meta> {
 
 impl<'a, ViewData: Clone + 'a, Data, Meta> Clone for ResponseItemRef<'a, ViewData, Data, Meta> {
     fn clone(&self) -> Self {
-        Self { view: self.view.clone(), base: self.base }
+        Self {
+            view: self.view.clone(),
+            base: self.base,
+        }
     }
 }
 
@@ -418,8 +418,7 @@ impl<'a, ViewData: 'a, Data, Meta> ResponseItemRef<'a, ViewData, Data, Meta> {
     pub fn map<NewViewData: 'a>(
         self,
         f: impl FnOnce(ViewData) -> NewViewData,
-    ) -> ResponseItemRef<'a, NewViewData, Data, Meta>
-    {
+    ) -> ResponseItemRef<'a, NewViewData, Data, Meta> {
         ResponseItemRef {
             view: f(self.view),
             base: self.base,
@@ -429,8 +428,7 @@ impl<'a, ViewData: 'a, Data, Meta> ResponseItemRef<'a, ViewData, Data, Meta> {
     pub fn ref_map<NewViewData: 'a>(
         &self,
         f: impl FnOnce(&ViewData) -> NewViewData,
-    ) -> ResponseItemRef<'a, NewViewData, Data, Meta>
-    {
+    ) -> ResponseItemRef<'a, NewViewData, Data, Meta> {
         ResponseItemRef {
             view: f(&self.view),
             base: self.base,
@@ -440,8 +438,7 @@ impl<'a, ViewData: 'a, Data, Meta> ResponseItemRef<'a, ViewData, Data, Meta> {
     pub fn ref_mut_map<NewViewData: 'a>(
         &mut self,
         f: impl FnOnce(&mut ViewData) -> NewViewData,
-    ) -> ResponseItemRef<'a, NewViewData, Data, Meta>
-    {
+    ) -> ResponseItemRef<'a, NewViewData, Data, Meta> {
         ResponseItemRef {
             view: f(&mut self.view),
             base: self.base,

@@ -4,8 +4,8 @@ use futures_util::{Stream, StreamExt, TryFutureExt};
 use log::{error, info};
 use sentry::Breadcrumb;
 
-use crate::{Error, Router};
 use crate::tweet::{concat_param, model};
+use crate::{Error, Router};
 
 fn create_endpoint_url() -> reqwest::Url {
     const STREAM_ENDPOINT: &'static str = "https://api.twitter.com/2/tweets/search/stream";
@@ -99,8 +99,7 @@ pub async fn run_line_loop(
     cache_dir: &std::path::Path,
     resp: reqwest::Response,
     router: &mut Router,
-) -> Result<std::convert::Infallible, Error>
-{
+) -> Result<std::convert::Infallible, Error> {
     let discord_client = reqwest::Client::builder().build().unwrap();
 
     let lines = make_stream(resp);
@@ -113,7 +112,7 @@ pub async fn run_line_loop(
                 info!("Stream closed");
                 sentry::capture_message("Stream closed", sentry::Level::Info);
                 return Err(Error::StreamClosed);
-            },
+            }
         };
 
         let mut line = match line_result {

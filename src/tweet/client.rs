@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use log::{error, info};
 use reqwest::{
@@ -25,7 +25,10 @@ impl TwitterClient {
         let token = token.as_ref();
 
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        );
 
         let client = Client::builder()
             .gzip(true)
@@ -51,7 +54,10 @@ impl TwitterClient {
 }
 
 impl TwitterClient {
-    pub async fn run_stream(&self, router: &mut Router) -> Result<std::convert::Infallible, crate::Error> {
+    pub async fn run_stream(
+        &self,
+        router: &mut Router,
+    ) -> Result<std::convert::Infallible, crate::Error> {
         let mut backoff = Backoff::new();
         backoff.backoff_fn(|duration| {
             let sleep_msecs = duration.as_millis();
@@ -66,8 +72,8 @@ impl TwitterClient {
         });
 
         loop {
-            let resp = backoff.run_fn(
-                || async {
+            let resp = backoff
+                .run_fn(|| async {
                     let err = match connect_once(self.client.clone()).await {
                         Ok(resp) => return Ok(resp),
                         Err(err) => err,
@@ -81,7 +87,10 @@ impl TwitterClient {
                     if let Some(status) = err.status() {
                         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                             error!("Request is ratelimited");
-                            sentry::capture_message("Request is ratelimited", sentry::Level::Warning);
+                            sentry::capture_message(
+                                "Request is ratelimited",
+                                sentry::Level::Warning,
+                            );
                             return Err(BackoffType::Ratelimit);
                         } else if status.is_server_error() {
                             error!("Server side error: {}", err);
@@ -93,16 +102,13 @@ impl TwitterClient {
                     error!("Unknown error: {}", err);
                     sentry::capture_error(&err);
                     Err(BackoffType::Server)
-                },
-            ).await;
+                })
+                .await;
             info!("Connected to filtered stream");
 
-            stream::run_line_loop(
-                self.client.clone(),
-                &self.cache_dir,
-                resp,
-                router,
-            ).await.err();
+            stream::run_line_loop(self.client.clone(), &self.cache_dir, resp, router)
+                .await
+                .err();
         }
     }
 
@@ -116,7 +122,10 @@ impl TwitterClient {
         let mut catchup = true;
         loop {
             timer.tick().await;
-            log::debug!("Running list fetch{}", if catchup { " (catch-up)" } else { "" });
+            log::debug!(
+                "Running list fetch{}",
+                if catchup { " (catch-up)" } else { "" }
+            );
 
             let stream = config.run_once(&self.client, &self.cache_dir, catchup);
             futures_util::pin_mut!(stream);

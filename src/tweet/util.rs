@@ -9,8 +9,7 @@ macro_rules! concat_param {
 async fn retrieve_single(
     client: &reqwest::Client,
     id: &str,
-) -> Result<model::ResponseItem<model::Tweet>, crate::Error>
-{
+) -> Result<model::ResponseItem<model::Tweet>, crate::Error> {
     const TWEET_ENDPOINT: &'static str = "https://api.twitter.com/2/tweets";
     let mut url = TWEET_ENDPOINT.parse::<reqwest::Url>().unwrap();
     url.path_segments_mut().unwrap().push(id);
@@ -38,24 +37,19 @@ async fn retrieve_single(
         )
         .finish();
 
-    let resp = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?;
+    let resp = client.get(url).send().await?.error_for_status()?;
 
     let resp = resp.json::<model::TwitterResponse<model::Tweet>>().await?;
     match resp {
         model::TwitterResponse::Ok(resp) => Ok(resp),
-        model::TwitterResponse::Error(e) => Err(e.into())
+        model::TwitterResponse::Error(e) => Err(e.into()),
     }
 }
 
 async fn retrieve_many(
     client: &reqwest::Client,
     ids: &[&str],
-) -> Result<model::ResponseItem<Vec<model::Tweet>>, crate::Error>
-{
+) -> Result<model::ResponseItem<Vec<model::Tweet>>, crate::Error> {
     use futures_util::TryFutureExt;
     use futures_util::TryStreamExt;
 
@@ -86,25 +80,24 @@ async fn retrieve_many(
         .finish();
 
     let mut req_fut = futures_util::stream::FuturesOrdered::new();
-    for ids in ids.chunks(100) { // 100 tweets at a time
+    for ids in ids.chunks(100) {
+        // 100 tweets at a time
         let id_param = ids.join(",");
         let mut url = url.clone();
         url.query_pairs_mut().append_pair("ids", &id_param).finish();
 
-        req_fut.push(
-            client
-                .get(url)
-                .send()
-                .map_err(crate::Error::from)
-                .and_then(|resp| async move {
-                    let resp = resp.error_for_status()?;
-                    let resp = resp.json::<model::TwitterResponse<Vec<model::Tweet>>>().await?;
-                    match resp {
-                        model::TwitterResponse::Ok(resp) => Ok(resp),
-                        model::TwitterResponse::Error(e) => Err(crate::Error::from(e)),
-                    }
-                })
-        );
+        req_fut.push(client.get(url).send().map_err(crate::Error::from).and_then(
+            |resp| async move {
+                let resp = resp.error_for_status()?;
+                let resp = resp
+                    .json::<model::TwitterResponse<Vec<model::Tweet>>>()
+                    .await?;
+                match resp {
+                    model::TwitterResponse::Ok(resp) => Ok(resp),
+                    model::TwitterResponse::Error(e) => Err(crate::Error::from(e)),
+                }
+            },
+        ));
     }
 
     let base = if let Some(base) = req_fut.try_next().await? {
@@ -112,19 +105,20 @@ async fn retrieve_many(
     } else {
         panic!("no tweet IDs given");
     };
-    let resp = req_fut.try_fold(
-        base,
-        |base, tweets| async move {
-            Ok(base.merge(tweets, |mut t1, t2| { t1.extend(t2); t1 }))
-        },
-    ).await?;
+    let resp = req_fut
+        .try_fold(base, |base, tweets| async move {
+            Ok(base.merge(tweets, |mut t1, t2| {
+                t1.extend(t2);
+                t1
+            }))
+        })
+        .await?;
     Ok(resp)
 }
 
 fn needs_augment<Data, Meta>(
     tweet: model::ResponseItemRef<'_, &model::Tweet, Data, Meta>,
-) -> Option<String>
-{
+) -> Option<String> {
     let real_tweet = if let Some(rt_id) = tweet.view_data().get_retweet_source() {
         tweet.includes().get_tweet(rt_id).unwrap()
     } else {
@@ -149,8 +143,7 @@ fn needs_augment<Data, Meta>(
 pub async fn load_augment_data<Data, Meta>(
     client: &reqwest::Client,
     tweet: model::ResponseItemRef<'_, &model::Tweet, Data, Meta>,
-) -> Result<Option<model::ResponseItem<model::Tweet>>, crate::Error>
-{
+) -> Result<Option<model::ResponseItem<model::Tweet>>, crate::Error> {
     if let Some(referenced_tweet_id) = needs_augment(tweet) {
         // retrieve tweet again
         sentry::add_breadcrumb(sentry::Breadcrumb {
@@ -159,7 +152,10 @@ pub async fn load_augment_data<Data, Meta>(
             level: sentry::Level::Info,
             data: [
                 (String::from("id"), tweet.view_data().id().into()),
-                (String::from("referenced_tweet_id"), serde_json::Value::String(referenced_tweet_id.clone())),
+                (
+                    String::from("referenced_tweet_id"),
+                    serde_json::Value::String(referenced_tweet_id.clone()),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -175,8 +171,7 @@ pub async fn load_augment_data<Data, Meta>(
 pub async fn load_batch_augment_data<Data, Meta>(
     client: &reqwest::Client,
     tweets: model::ResponseItemRef<'_, &[model::Tweet], Data, Meta>,
-) -> Result<Option<model::ResponseItem<Vec<model::Tweet>>>, crate::Error>
-{
+) -> Result<Option<model::ResponseItem<Vec<model::Tweet>>>, crate::Error> {
     let mut tweets_view = tweets.map(|v| v.iter());
     let mut ids = Vec::new();
     loop {
