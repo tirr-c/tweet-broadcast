@@ -180,12 +180,10 @@ pub async fn run_line_loop(
         let routes = route_result.routes();
         let cached = route_result.cached();
         if routes.is_empty() {
-            println!(
-                "No routes: {}{}",
-                real_tweet.id(),
-                if cached { " (cached)" } else { "" }
+            log::debug!(
+                "No routes: {}{}, score: {:.4}",
+                real_tweet.id(), if cached { " (cached)" } else { "" }, score,
             );
-            println!("  Score: {:.4}", score);
         } else {
             if !cached {
                 if let Err(e) = route_result.save_cache(cache_dir).await {
@@ -220,35 +218,12 @@ pub async fn run_line_loop(
                 });
             }
 
-            println!(
-                "{author_name} (@{author_username}):{possibly_sensitive}",
-                author_name = author.name(),
+            log::debug!(
+                "Relaying tweet by @{author_username}, matching rule(s): {rules:?}, score: {score:.4}",
                 author_username = author.username(),
-                possibly_sensitive = if real_tweet.possibly_sensitive() {
-                    " [!]"
-                } else {
-                    ""
-                }
+                rules = line.matching_rules().unwrap().iter().map(|r| r.tag()).collect::<Vec<_>>(),
+                score = score,
             );
-            for line in real_tweet.unescaped_text().split('\n') {
-                println!("  {}", line);
-            }
-            print!("    Tags:");
-            for rule in line.matching_rules().unwrap() {
-                print!(" {}", rule.tag());
-            }
-            println!();
-            println!("    Score: {:.4}", score);
-            for key in real_tweet.media_keys() {
-                let media = line.includes().get_media(key).unwrap();
-                println!(
-                    "    {} ({}x{})",
-                    media.url().unwrap(),
-                    media.width(),
-                    media.height()
-                );
-            }
-            println!();
         }
     }
 }
