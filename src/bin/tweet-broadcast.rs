@@ -28,7 +28,7 @@ async fn main() {
         mut engines,
     } = Args::parse();
 
-    if engines.len() == 0 {
+    if engines.is_empty() {
         engines.push(Engine::FilteredStream);
         engines.push(Engine::List);
     }

@@ -8,7 +8,7 @@ use crate::tweet::{concat_param, model};
 use crate::{Error, Router};
 
 fn create_endpoint_url() -> reqwest::Url {
-    const STREAM_ENDPOINT: &'static str = "https://api.twitter.com/2/tweets/search/stream";
+    const STREAM_ENDPOINT: &str = "https://api.twitter.com/2/tweets/search/stream";
     let mut url = reqwest::Url::parse(STREAM_ENDPOINT).unwrap();
     url.query_pairs_mut()
         .append_pair(
@@ -51,7 +51,7 @@ pub async fn connect_once(client: reqwest::Client) -> reqwest::Result<reqwest::R
 
 fn make_stream(
     mut resp: reqwest::Response,
-) -> impl Stream<Item = Result<model::TwitterResponse<model::Tweet>, Error>> {
+) -> impl Stream<Item = Result<model::TwitterResponse<model::Tweet, model::StreamMeta>, Error>> {
     async fn read_single(resp: &mut reqwest::Response) -> Result<Option<bytes::Bytes>, Error> {
         Ok(tokio::time::timeout(Duration::from_secs(30), resp.chunk())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::TimedOut, e))
@@ -95,7 +95,7 @@ fn make_stream(
 }
 
 pub async fn run_line_loop(
-    client: reqwest::Client,
+    client: &super::TwitterClient,
     cache_dir: &std::path::Path,
     resp: reqwest::Response,
     router: &mut Router,
@@ -133,13 +133,19 @@ pub async fn run_line_loop(
             Err(e) => {
                 error!("Stream error: {}", e);
                 sentry::capture_error(&e);
-                return Err(e.into());
+                return Err(e);
             }
         };
 
-        match crate::tweet::util::load_augment_data(&client, line.as_view()).await {
+        match crate::tweet::util::load_batch_augment_data(
+            client,
+            std::slice::from_ref(&line.data),
+            &line.includes,
+        )
+        .await
+        {
             Ok(Some(augment_data)) => {
-                line.augment(augment_data);
+                line.includes.augment(augment_data.includes);
             }
             Ok(_) => {}
             Err(e) => {
@@ -162,13 +168,13 @@ pub async fn run_line_loop(
             }
         };
 
-        let real_tweet = if let Some(rt_id) = line.data().get_retweet_source() {
-            line.includes().get_tweet(rt_id).unwrap()
+        let real_tweet = if let Some(rt_id) = line.data.get_retweet_source() {
+            line.includes.get_tweet(rt_id).unwrap()
         } else {
-            line.data()
+            &line.data
         };
         let author_id = real_tweet.author_id().unwrap();
-        let author = line.includes().get_user(author_id).unwrap();
+        let author = line.includes.get_user(author_id).unwrap();
         let tweet_metrics = real_tweet.metrics().unwrap();
         let user_metrics = author.metrics().unwrap();
         let score = crate::compute_score(
@@ -182,7 +188,9 @@ pub async fn run_line_loop(
         if routes.is_empty() {
             log::debug!(
                 "No routes: {}{}, score: {:.4}",
-                real_tweet.id(), if cached { " (cached)" } else { "" }, score,
+                real_tweet.id(),
+                if cached { " (cached)" } else { "" },
+                score,
             );
         } else {
             if !cached {
@@ -221,7 +229,7 @@ pub async fn run_line_loop(
             log::debug!(
                 "Relaying tweet by @{author_username}, matching rule(s): {rules:?}, score: {score:.4}",
                 author_username = author.username(),
-                rules = line.matching_rules().unwrap().iter().map(|r| r.tag()).collect::<Vec<_>>(),
+                rules = line.meta.matching_rules().iter().map(|r| r.tag()).collect::<Vec<_>>(),
                 score = score,
             );
         }

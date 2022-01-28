@@ -65,25 +65,27 @@ impl Router {
 
     pub async fn call<'data>(
         &mut self,
-        data: &'data model::ResponseItem<model::Tweet>,
+        res: &'data model::ResponseItem<model::Tweet, model::StreamMeta>,
         cache_dir: impl AsRef<std::path::Path>,
     ) -> Result<RouteResult<'data>, Error> {
-        let tweet = if let Some(rt_id) = data.data().get_retweet_source() {
-            Some(data.includes().get_tweet(rt_id).unwrap())
-        } else {
-            None
-        };
+        let model::ResponseItem {
+            data,
+            includes,
+            meta,
+        } = res;
+        let tweet = data
+            .get_retweet_source()
+            .map(|rt_id| includes.get_tweet(rt_id).unwrap());
         let original_data = if tweet.is_some() {
-            let tweet = data.data();
-            let author_id = tweet.author_id().unwrap();
-            let author = data.includes().get_user(author_id).unwrap();
-            Some((tweet, author))
+            let author_id = data.author_id().unwrap();
+            let author = includes.get_user(author_id).unwrap();
+            Some((data, author))
         } else {
             None
         };
-        let tweet = tweet.unwrap_or(data.data());
+        let tweet = tweet.unwrap_or(data);
         let author_id = tweet.author_id().unwrap();
-        let author = data.includes().get_user(author_id).unwrap();
+        let author = includes.get_user(author_id).unwrap();
 
         let meta_path = cache_dir.as_ref().join(format!("meta/{}.json", tweet.id()));
         let has_cache = tokio::fs::metadata(meta_path).await.is_ok();
@@ -95,11 +97,10 @@ impl Router {
         let media = tweet
             .media_keys()
             .iter()
-            .filter_map(|k| data.includes().get_media(k))
+            .filter_map(|k| includes.get_media(k))
             .collect::<Vec<_>>();
-        let tags = data
+        let tags = meta
             .matching_rules()
-            .unwrap_or(&[])
             .iter()
             .map(|x| x.tag())
             .collect::<Vec<_>>();
@@ -125,7 +126,7 @@ impl Router {
 
         let recv = v8::undefined(scope);
         let route_fn = self.route_fn.open(scope);
-        let ret = route_fn.call(scope, recv.into(), &[data_obj.into()]);
+        let ret = route_fn.call(scope, recv.into(), &[data_obj]);
         if scope.has_caught() {
             let msg = scope.message().unwrap();
             let msg = msg.get(scope).to_rust_string_lossy(scope);

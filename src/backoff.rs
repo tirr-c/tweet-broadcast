@@ -11,6 +11,14 @@ impl std::fmt::Debug for Backoff {
     }
 }
 
+impl Default for Backoff {
+    fn default() -> Self {
+        Self {
+            backoff_fn: Box::new(Backoff::default_backoff_fn),
+        }
+    }
+}
+
 impl Backoff {
     fn default_backoff_fn(duration: std::time::Duration) -> BoxFuture<'static, ()> {
         log::info!("Waiting {} ms...", duration.as_millis());
@@ -19,9 +27,7 @@ impl Backoff {
     }
 
     pub fn new() -> Self {
-        Self {
-            backoff_fn: Box::new(Backoff::default_backoff_fn),
-        }
+        Self::default()
     }
 
     pub fn backoff_fn(
@@ -70,9 +76,9 @@ enum BackoffState {
 
 impl BackoffState {
     fn sleep_msecs(&self) -> u64 {
-        match self {
-            &Self::None => 0,
-            &Self::Ratelimit(n) => {
+        match *self {
+            Self::None => 0,
+            Self::Ratelimit(n) => {
                 let mins = if n < 6 {
                     1u64 << (n.saturating_sub(2))
                 } else {
@@ -80,14 +86,14 @@ impl BackoffState {
                 };
                 mins * 60 * 1000
             }
-            &Self::Network(n) => {
+            Self::Network(n) => {
                 if n < 128 {
                     (n as u64) * 250
                 } else {
                     32000
                 }
             }
-            &Self::Server(n) => {
+            Self::Server(n) => {
                 let secs = if n < 6 {
                     1u64 << n.saturating_sub(1)
                 } else {

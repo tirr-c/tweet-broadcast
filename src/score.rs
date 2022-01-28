@@ -29,7 +29,7 @@ pub fn compute_score(
     let likeparam = likes as f64 / 2000.0;
     let like_score = likeparam.log2().max(0.0) + likeparam.min(1.0);
 
-    let f_log_y = -2.0f64.log10() + 0.2f64.log10() * 1e-5 * followers as f64;
+    let f_log_y = -(2.0f64.log10()) + 0.2f64.log10() * 1e-5 * followers as f64;
     let follower_adjust = 1.5f64 - 10.0f64.powf(f_log_y);
     let follow_rate_adjust =
         (1.0f64 - (4.0 / 9.0) * (followers as f64 / following as f64).powi(2)).max(0.0);

@@ -8,7 +8,10 @@ use reqwest::{
 };
 use sentry::Breadcrumb;
 
-use crate::{Backoff, BackoffType, Router};
+use crate::{
+    tweet::{model, util},
+    Backoff, BackoffType, Router,
+};
 
 mod list;
 mod stream;
@@ -50,6 +53,81 @@ impl TwitterClient {
 
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
+    }
+}
+
+impl TwitterClient {
+    pub async fn retrieve(
+        &self,
+        ids: &[&str],
+    ) -> Result<model::ResponseItem<Vec<model::Tweet>>, crate::Error> {
+        use futures_util::{TryFutureExt, TryStreamExt};
+
+        const TWEET_ENDPOINT: &str = "https://api.twitter.com/2/tweets";
+        let mut url = TWEET_ENDPOINT.parse::<reqwest::Url>().unwrap();
+        util::append_query_param_for_tweet(&mut url);
+
+        Ok(match ids {
+            [] => Default::default(),
+            [id] => {
+                url.path_segments_mut().unwrap().push(id);
+
+                let res = self
+                    .client
+                    .get(url)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<model::TwitterResponse<model::Tweet>>()
+                    .await?
+                    .into_result()?;
+                let model::ResponseItem {
+                    data,
+                    includes,
+                    meta,
+                } = res;
+                model::ResponseItem {
+                    data: vec![data],
+                    includes,
+                    meta,
+                }
+            }
+            ids => {
+                let mut req_fut = futures_util::stream::FuturesOrdered::new();
+                for ids in ids.chunks(100) {
+                    // 100 tweets at a time
+                    let id_param = ids.join(",");
+                    let mut url = url.clone();
+                    url.query_pairs_mut().append_pair("ids", &id_param).finish();
+
+                    req_fut.push(
+                        self.client
+                            .get(url)
+                            .send()
+                            .map_err(crate::Error::from)
+                            .and_then(|resp| async move {
+                                let resp = resp
+                                    .error_for_status()?
+                                    .json::<model::TwitterResponse<Vec<model::Tweet>>>()
+                                    .await?
+                                    .into_result()?;
+                                Ok(resp)
+                            }),
+                    );
+                }
+
+                req_fut
+                    .try_fold(
+                        model::ResponseItem::<Vec<_>>::default(),
+                        |mut base, tweets| async move {
+                            base.data.extend(tweets.data);
+                            base.includes.augment(tweets.includes);
+                            Ok(base)
+                        },
+                    )
+                    .await?
+            }
+        })
     }
 }
 
@@ -106,7 +184,7 @@ impl TwitterClient {
                 .await;
             info!("Connected to filtered stream");
 
-            stream::run_line_loop(self.client.clone(), &self.cache_dir, resp, router)
+            stream::run_line_loop(self, &self.cache_dir, resp, router)
                 .await
                 .err();
         }
@@ -127,7 +205,7 @@ impl TwitterClient {
                 if catchup { " (catch-up)" } else { "" }
             );
 
-            let stream = config.run_once(&self.client, &self.cache_dir, catchup);
+            let stream = config.run_once(self, &self.cache_dir, catchup);
             futures_util::pin_mut!(stream);
 
             while let Some((id, ret)) = stream.next().await {
