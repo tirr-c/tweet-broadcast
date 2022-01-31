@@ -407,17 +407,16 @@ impl ListMeta {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TwitterError {
-    message: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, thiserror::Error)]
-#[error("{title}: {detail} {ty}")]
-pub struct ResponseError {
-    errors: Vec<TwitterError>,
     title: String,
     detail: String,
     #[serde(rename = "type")]
     ty: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, thiserror::Error)]
+#[error("{}", .errors.iter().map(|x| &*x.detail).collect::<Vec<_>>().join(" "))]
+pub struct ResponseError {
+    errors: Vec<TwitterError>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
