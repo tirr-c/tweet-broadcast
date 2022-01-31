@@ -15,7 +15,7 @@ pub async fn run_line_loop<Cache>(
 where
     Cache: LoadCache<model::Tweet> + StoreCache<model::Tweet> + StoreCache<model::User> + StoreCache<model::Media> + StoreCache<tweet_route::CacheData>,
 {
-    use futures_util::StreamExt;
+    use futures_util::{StreamExt, TryStreamExt};
     let discord_client = reqwest::Client::builder().build().unwrap();
 
     let lines = client.make_stream();
@@ -51,6 +51,19 @@ where
                 if cached { " (cached)" } else { "" },
                 payload.score,
             );
+
+            if payload.score > 30.0 {
+                log::debug!("Downloading media for {} anyway (score > 30)", payload.tweet.id());
+
+                let futures = futures_util::stream::FuturesUnordered::new();
+                for &media in &payload.media {
+                    futures.push(async {
+                        cache.store(media).await?;
+                        Ok::<_, Cache::Error>(())
+                    });
+                }
+                futures.try_collect::<()>().await?;
+            }
         } else {
             if !cached {
                 let ret = async {
