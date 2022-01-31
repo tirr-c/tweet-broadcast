@@ -23,6 +23,8 @@ enum Engine {
 struct Args {
     #[clap(short, long, env = "TWITTER_CACHE", default_value = "./.tweets")]
     cache: std::path::PathBuf,
+    #[clap(long, env = "TWITTER_SAVE_IMAGES")]
+    save_images: bool,
     #[clap(short, long = "engine")]
     engines: Vec<Engine>,
 }
@@ -31,9 +33,9 @@ struct Args {
 async fn main() {
     let Args {
         cache: cache_dir,
+        save_images,
         mut engines,
     } = Args::parse();
-    let cache = cache::FsCache::new(&cache_dir);
 
     if engines.is_empty() {
         engines.push(Engine::FilteredStream);
@@ -55,6 +57,7 @@ async fn main() {
         },
     ));
 
+    let cache = cache::FsCache::new(&cache_dir, save_images);
     let client = TwitterClient::new(token);
 
     let platform = v8::Platform::new(0, false).make_shared();

@@ -12,10 +12,8 @@ pub struct FsCache {
 }
 
 impl FsCache {
-    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        let enable_images = std::env::var("TWITTER_SAVE_IMAGES");
-        let enable_images = enable_images.unwrap_or_else(|_| String::new()) == "1";
-        let client = if enable_images {
+    pub fn new(path: impl Into<std::path::PathBuf>, save_images: bool) -> Self {
+        let client = if save_images {
             log::info!("Media downloading enabled");
             Some(reqwest::Client::builder().build().unwrap())
         } else {
