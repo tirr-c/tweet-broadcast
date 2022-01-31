@@ -4,8 +4,8 @@ use futures_util::{Stream, StreamExt, TryFutureExt};
 use log::{error, info};
 use sentry::Breadcrumb;
 
-use crate::tweet::{concat_param, model};
-use crate::{Error, Router};
+use crate::tweet::{concat_param, model, util, TwitterClient};
+use crate::{Backoff, BackoffType, Error, Router};
 
 fn create_endpoint_url() -> reqwest::Url {
     const STREAM_ENDPOINT: &str = "https://api.twitter.com/2/tweets/search/stream";
@@ -41,7 +41,7 @@ fn create_endpoint_url() -> reqwest::Url {
     url
 }
 
-pub async fn connect_once(client: reqwest::Client) -> reqwest::Result<reqwest::Response> {
+async fn connect_once(client: &reqwest::Client) -> reqwest::Result<reqwest::Response> {
     client
         .get(create_endpoint_url())
         .send()
@@ -49,27 +49,71 @@ pub async fn connect_once(client: reqwest::Client) -> reqwest::Result<reqwest::R
         .error_for_status()
 }
 
+async fn connect_with_backoff(client: &TwitterClient) -> reqwest::Response {
+    let mut backoff = Backoff::new();
+    backoff.backoff_fn(|duration| {
+        let sleep_msecs = duration.as_millis();
+        info!("Waiting {} ms...", sleep_msecs);
+        sentry::add_breadcrumb(Breadcrumb {
+            category: Some(String::from("network")),
+            message: Some(format!("Waiting for {} ms", sleep_msecs)),
+            level: sentry::Level::Info,
+            ..Default::default()
+        });
+        Box::pin(tokio::time::sleep(duration))
+    });
+
+    backoff
+        .run_fn(|| async {
+            let err = match connect_once(client).await {
+                Ok(resp) => return Ok(resp),
+                Err(err) => err,
+            };
+
+            if err.is_connect() {
+                error!("Failed to connect: {}", err);
+                sentry::capture_error(&err);
+                return Err(BackoffType::Network);
+            }
+            if let Some(status) = err.status() {
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    error!("Request is ratelimited");
+                    sentry::capture_message("Request is ratelimited", sentry::Level::Warning);
+                    return Err(BackoffType::Ratelimit);
+                } else if status.is_server_error() {
+                    error!("Server side error: {}", err);
+                    sentry::capture_error(&err);
+                    return Err(BackoffType::Server);
+                }
+            }
+
+            error!("Unknown error: {}", err);
+            sentry::capture_error(&err);
+            Err(BackoffType::Server)
+        })
+        .await
+}
+
 fn make_stream(
-    mut resp: reqwest::Response,
-) -> impl Stream<Item = Result<model::TwitterResponse<model::Tweet, model::StreamMeta>, Error>> {
+    client: TwitterClient,
+) -> impl Stream<Item = Result<model::ResponseItem<model::Tweet, model::StreamMeta>, Error>> {
     async fn read_single(resp: &mut reqwest::Response) -> Result<Option<bytes::Bytes>, Error> {
         Ok(tokio::time::timeout(Duration::from_secs(30), resp.chunk())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::TimedOut, e))
             .await??)
     }
 
-    async_stream::stream! {
+    async_stream::try_stream! {
+        let mut resp = connect_with_backoff(&client).await;
+        info!("Connected to filtered stream");
+
         let mut s = Vec::new();
         loop {
-            match read_single(&mut resp).await {
-                Err(e) => {
-                    yield Err(e);
+            match read_single(&mut resp).await? {
+                None => {
                     break;
                 }
-                Ok(None) => {
-                    break;
-                }
-                Ok(Some(bytes)) => {
+                Some(bytes) => {
                     let mut lines = bytes.split(|&b| b == b'\n');
                     s.extend(lines.next().unwrap().iter().copied());
                     for line in lines {
@@ -82,27 +126,45 @@ fn make_stream(
                                 level: sentry::Level::Info,
                                 ..Default::default()
                             });
-                            yield serde_json::from_str(string)
-                                .map_err(|e| Error::parse_error(string.to_owned(), e));
+                            let res = serde_json::from_str::<model::TwitterResponse<_, _>>(string);
+                            match res {
+                                Ok(res) => {
+                                    let mut item = res.into_result()?;
+                                    let augment_data = util::load_batch_augment_data(
+                                        &client,
+                                        std::slice::from_ref(&item.data),
+                                        &item.includes,
+                                    ).await?;
+                                    if let Some(augment_data) = augment_data {
+                                        item.includes.augment(augment_data.includes);
+                                    }
+                                    yield item;
+                                }
+                                Err(e) => {
+                                    error!("Parse error: {}", e);
+                                    error!("while parsing: {}", string);
+                                    let mut ev = sentry::event_from_error(&e);
+                                    ev.extra.insert(String::from("message"), string.into());
+                                    sentry::capture_event(ev);
+                                }
+                            }
                         }
                         s = line.to_vec();
                     }
                 }
             }
         }
-        drop(resp);
     }
 }
 
 pub async fn run_line_loop(
-    client: &super::TwitterClient,
+    client: &TwitterClient,
     cache_dir: &std::path::Path,
-    resp: reqwest::Response,
     router: &mut Router,
 ) -> Result<std::convert::Infallible, Error> {
     let discord_client = reqwest::Client::builder().build().unwrap();
 
-    let lines = make_stream(resp);
+    let lines = make_stream(client.clone());
     futures_util::pin_mut!(lines);
 
     loop {
@@ -115,21 +177,8 @@ pub async fn run_line_loop(
             }
         };
 
-        let mut line = match line_result {
-            Ok(model::TwitterResponse::Error(e)) => {
-                error!("Twitter error: {}", e);
-                sentry::capture_error(&e);
-                return Err(e.into());
-            }
-            Ok(model::TwitterResponse::Ok(line)) => line,
-            Err(Error::Parse(e)) => {
-                error!("Parse error: {}", e);
-                error!("  while parsing: {}", e.string());
-                let mut ev = sentry::event_from_error(&e);
-                ev.extra.insert(String::from("message"), e.string().into());
-                sentry::capture_event(ev);
-                continue;
-            }
+        let tweet = match line_result {
+            Ok(line) => line,
             Err(e) => {
                 error!("Stream error: {}", e);
                 sentry::capture_error(&e);
@@ -137,44 +186,26 @@ pub async fn run_line_loop(
             }
         };
 
-        match crate::tweet::util::load_batch_augment_data(
-            client,
-            std::slice::from_ref(&line.data),
-            &line.includes,
-        )
-        .await
-        {
-            Ok(Some(augment_data)) => {
-                line.includes.augment(augment_data.includes);
-            }
-            Ok(_) => {}
-            Err(e) => {
-                error!("Failed to retrieve original tweet: {}", e);
-                sentry::capture_error(&e);
-                return Err(e);
-            }
-        };
-
-        let route_result = match router.call(&line, cache_dir).await {
+        let route_result = match router.call(&tweet, cache_dir).await {
             Ok(route_result) => route_result,
             Err(e) => {
                 error!("Failed to route: {}", e);
-                error!("Input: {:#?}", line);
+                error!("Input: {:#?}", tweet);
                 let mut ev = sentry::event_from_error(&e);
                 ev.extra
-                    .insert(String::from("data"), format!("{:?}", line).into());
+                    .insert(String::from("data"), format!("{:?}", tweet).into());
                 sentry::capture_event(ev);
                 continue;
             }
         };
 
-        let real_tweet = if let Some(rt_id) = line.data.get_retweet_source() {
-            line.includes.get_tweet(rt_id).unwrap()
+        let real_tweet = if let Some(rt_id) = tweet.data.get_retweet_source() {
+            tweet.includes.get_tweet(rt_id).unwrap()
         } else {
-            &line.data
+            &tweet.data
         };
         let author_id = real_tweet.author_id().unwrap();
-        let author = line.includes.get_user(author_id).unwrap();
+        let author = tweet.includes.get_user(author_id).unwrap();
         let tweet_metrics = real_tweet.metrics().unwrap();
         let user_metrics = author.metrics().unwrap();
         let score = crate::compute_score(
@@ -229,7 +260,7 @@ pub async fn run_line_loop(
             log::debug!(
                 "Relaying tweet by @{author_username}, matching rule(s): {rules:?}, score: {score:.4}",
                 author_username = author.username(),
-                rules = line.meta.matching_rules().iter().map(|r| r.tag()).collect::<Vec<_>>(),
+                rules = tweet.meta.matching_rules().iter().map(|r| r.tag()).collect::<Vec<_>>(),
                 score = score,
             );
         }

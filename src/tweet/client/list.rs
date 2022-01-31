@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use futures_util::{FutureExt, Stream};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -9,14 +8,20 @@ use crate::{
     Error,
 };
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct ListsConfig {
-    lists: HashMap<String, ListMeta>,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListMeta {
     webhooks: Vec<reqwest::Url>,
+}
+
+impl ListMeta {
+    pub fn webhooks(&self) -> &[reqwest::Url] {
+        &self.webhooks
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct ListsConfig {
+    lists: HashMap<String, ListMeta>,
 }
 
 impl ListsConfig {
@@ -38,93 +43,12 @@ impl ListsConfig {
 }
 
 impl ListsConfig {
-    pub fn run_once(
-        &self,
-        client: &TwitterClient,
-        cache_dir: impl AsRef<Path>,
-        catchup: bool,
-    ) -> impl Stream<Item = (String, Result<(), Error>)> {
-        use futures_util::TryStreamExt;
-
-        let cache_dir = cache_dir.as_ref();
-        let lists_fut = futures_util::stream::FuturesUnordered::new();
-        let webhook_client = reqwest::Client::builder().build().unwrap();
-
-        for (id, meta) in self.lists.iter() {
-            let id = id.clone();
-            let list_id = id.clone();
-            let cache_dir = cache_dir.to_owned();
-            let client = client.clone();
-            let webhooks = meta.webhooks.clone();
-            let webhook_client = webhook_client.clone();
-            lists_fut.push(
-                async move {
-                    let mut head = ListHead::from_cache_dir(list_id, &cache_dir).await?;
-                    let first_time = head.head.is_none();
-
-                    let model::ResponseItem {
-                        data: tweets,
-                        mut includes,
-                        ..
-                    } = head.load_and_update(&client, catchup).await?;
-
-                    // augment
-                    if !first_time && (!catchup || tweets.len() <= 5) {
-                        let augment_data =
-                            util::load_batch_augment_data(&client, &tweets, &includes).await?;
-                        if let Some(model::ResponseItem { includes: incl, .. }) = augment_data {
-                            includes.augment(incl);
-                        }
-                    }
-
-                    let tweets = &tweets;
-                    let includes = &includes;
-                    let webhooks_fut = futures_util::stream::FuturesUnordered::new();
-
-                    // execute webhooks
-                    for webhook in webhooks {
-                        let webhook_client = webhook_client.clone();
-                        let list_id = &head.id;
-
-                        webhooks_fut.push(async move {
-                            if catchup && tweets.len() > 5 {
-                                send_catchup_webhook(
-                                    webhook_client,
-                                    webhook,
-                                    list_id,
-                                    tweets.len(),
-                                )
-                                .await?;
-                            } else if first_time {
-                                send_first_time_webhook(webhook_client, webhook, list_id).await?;
-                            } else {
-                                for tweet in tweets {
-                                    send_webhook(
-                                        webhook_client.clone(),
-                                        webhook.clone(),
-                                        tweet,
-                                        includes,
-                                    )
-                                    .await?;
-                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                                }
-                            }
-                            Ok::<_, crate::Error>(())
-                        });
-                    }
-
-                    webhooks_fut.try_collect::<()>().await?;
-                    head.save_cache(&cache_dir).await?;
-                    Ok(())
-                }
-                .map(|ret| (id, ret)),
-            );
-        }
-        lists_fut
+    pub fn lists(&self) -> impl Iterator<Item = (&String, &ListMeta)> {
+        self.lists.iter()
     }
 }
 
-async fn send_first_time_webhook(
+pub async fn send_first_time_webhook(
     client: reqwest::Client,
     webhook_url: reqwest::Url,
     list_id: &str,
@@ -138,7 +62,7 @@ async fn send_first_time_webhook(
     execute_webhook(&client, &webhook_url, &payload).await
 }
 
-async fn send_catchup_webhook(
+pub async fn send_catchup_webhook(
     client: reqwest::Client,
     webhook_url: reqwest::Url,
     list_id: &str,
@@ -158,7 +82,7 @@ async fn send_catchup_webhook(
     execute_webhook(&client, &webhook_url, &payload).await
 }
 
-async fn send_webhook(
+pub async fn send_webhook(
     client: reqwest::Client,
     webhook_url: reqwest::Url,
     tweet: &model::Tweet,
@@ -264,13 +188,13 @@ async fn execute_webhook(
 }
 
 #[derive(Debug, Clone)]
-struct ListHead {
+pub struct ListHead {
     id: String,
     head: Option<String>,
 }
 
 impl ListHead {
-    async fn from_cache_dir(id: String, cache_dir: impl AsRef<Path>) -> Result<Self, Error> {
+    pub async fn from_cache_dir(id: String, cache_dir: impl AsRef<Path>) -> Result<Self, Error> {
         let cache_dir = cache_dir.as_ref();
         let head = tokio::fs::read_to_string(cache_dir.join(format!("lists/{}", id))).await;
         let head = match head {
@@ -281,7 +205,7 @@ impl ListHead {
         Ok(Self { id, head })
     }
 
-    async fn save_cache(&self, cache_dir: impl AsRef<Path>) -> Result<(), Error> {
+    pub async fn save_cache(&self, cache_dir: impl AsRef<Path>) -> Result<(), Error> {
         let cache_dir = cache_dir.as_ref();
         let path = cache_dir.join(format!("lists/{}", self.id));
         if let Some(head) = &self.head {
@@ -296,13 +220,23 @@ impl ListHead {
 }
 
 impl ListHead {
-    async fn load_and_update(
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn head(&self) -> Option<&str> {
+        self.head.as_deref()
+    }
+
+    pub async fn load_and_update(
         &mut self,
-        client: &reqwest::Client,
+        client: &TwitterClient,
         catchup: bool,
     ) -> Result<model::ResponseItem<Vec<model::Tweet>>, Error> {
-        let res = load_list_since(client, self, catchup).await?;
+        let mut res = load_list_since(client, self, catchup).await?;
         if let Some(last_tweet) = res.data.last() {
+            let updating = self.head.is_some();
+
             log::debug!(
                 "List {}: {} new tweet(s), last tweet ID is {}",
                 self.id,
@@ -310,6 +244,15 @@ impl ListHead {
                 last_tweet.id()
             );
             self.head = Some(last_tweet.id().to_owned());
+
+            // augment
+            if updating && (!catchup || res.data.len() <= 5) {
+                let augment_data =
+                    util::load_batch_augment_data(client, &res.data, &res.includes).await?;
+                if let Some(model::ResponseItem { includes, .. }) = augment_data {
+                    res.includes.augment(includes);
+                }
+            }
         }
         Ok(res)
     }
@@ -352,7 +295,7 @@ fn create_endpoint_url(id: &str, max_results: u32, pagination_token: Option<&str
 }
 
 async fn load_list_since(
-    client: &reqwest::Client,
+    client: &TwitterClient,
     list: &ListHead,
     catchup: bool,
 ) -> Result<model::ResponseItem<Vec<model::Tweet>>, Error> {

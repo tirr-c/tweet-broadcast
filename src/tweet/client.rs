@@ -6,16 +6,16 @@ use reqwest::{
     header::{self, HeaderMap, HeaderValue},
     Client,
 };
-use sentry::Breadcrumb;
 
 use crate::{
     tweet::{model, util},
-    Backoff, BackoffType, Router,
+    Router,
 };
 
 mod list;
 mod stream;
-use stream::connect_once;
+
+pub use list::ListHead;
 
 #[derive(Debug, Clone)]
 pub struct TwitterClient {
@@ -136,62 +136,18 @@ impl TwitterClient {
         &self,
         router: &mut Router,
     ) -> Result<std::convert::Infallible, crate::Error> {
-        let mut backoff = Backoff::new();
-        backoff.backoff_fn(|duration| {
-            let sleep_msecs = duration.as_millis();
-            info!("Waiting {} ms...", sleep_msecs);
-            sentry::add_breadcrumb(Breadcrumb {
-                category: Some(String::from("network")),
-                message: Some(format!("Waiting for {} ms", sleep_msecs)),
-                level: sentry::Level::Info,
-                ..Default::default()
-            });
-            Box::pin(tokio::time::sleep(duration))
-        });
-
         loop {
-            let resp = backoff
-                .run_fn(|| async {
-                    let err = match connect_once(self.client.clone()).await {
-                        Ok(resp) => return Ok(resp),
-                        Err(err) => err,
-                    };
-
-                    if err.is_connect() {
-                        error!("Failed to connect: {}", err);
-                        sentry::capture_error(&err);
-                        return Err(BackoffType::Network);
-                    }
-                    if let Some(status) = err.status() {
-                        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                            error!("Request is ratelimited");
-                            sentry::capture_message(
-                                "Request is ratelimited",
-                                sentry::Level::Warning,
-                            );
-                            return Err(BackoffType::Ratelimit);
-                        } else if status.is_server_error() {
-                            error!("Server side error: {}", err);
-                            sentry::capture_error(&err);
-                            return Err(BackoffType::Server);
-                        }
-                    }
-
-                    error!("Unknown error: {}", err);
-                    sentry::capture_error(&err);
-                    Err(BackoffType::Server)
-                })
-                .await;
-            info!("Connected to filtered stream");
-
-            stream::run_line_loop(self, &self.cache_dir, resp, router)
+            stream::run_line_loop(self, &self.cache_dir, router)
                 .await
                 .err();
         }
     }
 
     pub async fn run_list_loop(&self) -> Result<std::convert::Infallible, crate::Error> {
-        use futures_util::StreamExt;
+        use futures_util::{StreamExt, TryStreamExt};
+
+        let webhook_client = reqwest::Client::builder().build().unwrap();
+        let webhook_client = &webhook_client;
 
         let config = list::ListsConfig::from_cache_dir(&self.cache_dir).await?;
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -205,19 +161,78 @@ impl TwitterClient {
                 if catchup { " (catch-up)" } else { "" }
             );
 
-            let stream = config.run_once(self, &self.cache_dir, catchup);
-            futures_util::pin_mut!(stream);
+            let stream = futures_util::stream::FuturesUnordered::new();
+            for (id, meta) in config.lists() {
+                let fut = async move {
+                    let ret = async {
+                        let mut head =
+                            ListHead::from_cache_dir(id.to_owned(), &self.cache_dir).await?;
+                        let first_time = head.head().is_none();
+                        let tweets = head.load_and_update(self, catchup).await?;
+                        head.save_cache(&self.cache_dir).await?;
+                        Ok::<_, crate::Error>((tweets, first_time))
+                    }
+                    .await;
+                    let (tweets, first_time) = match ret {
+                        Ok(tweets) => tweets,
+                        Err(e) => {
+                            error!("List fetch for {} failed: {}", id, e);
+                            let mut event = sentry::event_from_error(&e);
+                            event.tags.insert(String::from("id"), id.into());
+                            sentry::capture_event(event);
+                            return;
+                        }
+                    };
+                    let model::ResponseItem {
+                        data: tweets,
+                        includes,
+                        ..
+                    } = &tweets;
 
-            while let Some((id, ret)) = stream.next().await {
-                if let Err(e) = ret {
-                    error!("List fetch for {} failed: {}", id, e);
-                    let mut event = sentry::event_from_error(&e);
-                    event.tags.insert(String::from("id"), id);
-                    sentry::capture_event(event);
-                } else {
+                    let webhooks_fut = futures_util::stream::FuturesUnordered::new();
+                    for webhook in meta.webhooks().iter().cloned() {
+                        let webhook_client = webhook_client.clone();
+                        webhooks_fut.push(async move {
+                            if catchup && tweets.len() > 5 {
+                                list::send_catchup_webhook(
+                                    webhook_client,
+                                    webhook,
+                                    id,
+                                    tweets.len(),
+                                )
+                                .await?;
+                            } else if first_time {
+                                list::send_first_time_webhook(webhook_client, webhook, id).await?;
+                            } else {
+                                for tweet in tweets {
+                                    list::send_webhook(
+                                        webhook_client.clone(),
+                                        webhook.clone(),
+                                        tweet,
+                                        includes,
+                                    )
+                                    .await?;
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                }
+                            }
+                            Ok::<_, crate::Error>(())
+                        });
+                    }
+
+                    let ret = webhooks_fut.try_collect::<()>().await;
+                    if let Err(e) = ret {
+                        log::error!("Failed to send webhook for {}: {}", id, e);
+                        let mut event = sentry::event_from_error(&e);
+                        event.tags.insert(String::from("id"), id.into());
+                        sentry::capture_event(event);
+                        return;
+                    }
+
                     log::debug!("List fetch for {} successful", id);
-                }
+                };
+                stream.push(fut);
             }
+            stream.collect::<()>().await;
 
             catchup = false;
         }
