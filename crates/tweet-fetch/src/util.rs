@@ -65,25 +65,7 @@ pub async fn load_batch_augment_data(
     }
 
     // retrieve tweet again
-    sentry::add_breadcrumb(sentry::Breadcrumb {
-        category: Some(String::from("tweet")),
-        message: Some(String::from("Media info missing, fetching tweet info")),
-        level: sentry::Level::Info,
-        data: [
-            (
-                String::from("ids"),
-                tweets
-                    .iter()
-                    .map(|x| x.id().to_owned())
-                    .collect::<Vec<_>>()
-                    .into(),
-            ),
-            (String::from("referenced_tweet_ids"), ids.clone().into()),
-        ]
-        .into_iter()
-        .collect(),
-        ..Default::default()
-    });
+    log::debug!("Media info missing, fetching tweet info: {:?}", ids);
     let resp = client
         .retrieve(&ids.iter().map(|s| &**s).collect::<Vec<_>>())
         .await?;

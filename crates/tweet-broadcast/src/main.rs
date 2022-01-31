@@ -3,7 +3,12 @@ use std::collections::HashSet;
 use clap::Parser;
 use tokio::signal::unix as unix_signal;
 
-use tweet_broadcast::{tweet::TwitterClient, Router};
+use tweet_fetch::TwitterClient;
+use tweet_route::Router;
+
+mod cache;
+mod list;
+mod stream;
 
 #[derive(Debug, PartialEq, Eq, Hash, strum::EnumString, strum::Display)]
 #[strum(serialize_all = "snake_case")]
@@ -27,6 +32,7 @@ async fn main() {
         cache: cache_dir,
         mut engines,
     } = Args::parse();
+    let cache = cache::FsCache::new(&cache_dir);
 
     if engines.is_empty() {
         engines.push(Engine::FilteredStream);
@@ -35,7 +41,6 @@ async fn main() {
     let engines = engines.into_iter().collect::<HashSet<_>>();
 
     std::fs::create_dir_all(&cache_dir).expect("Invalid cache directory");
-    std::fs::create_dir_all(cache_dir.join("meta")).unwrap();
     std::fs::create_dir_all(cache_dir.join("images")).unwrap();
 
     let token = std::env::var("TWITTER_APP_TOKEN").expect("TWITTER_APP_TOKEN not found or invalid");
@@ -49,7 +54,7 @@ async fn main() {
         },
     ));
 
-    let client = TwitterClient::new(token, cache_dir);
+    let client = TwitterClient::new(token);
 
     let platform = v8::Platform::new(0, false).make_shared();
     v8::V8::initialize_platform(platform);
@@ -67,10 +72,12 @@ async fn main() {
     let stream_handle = if engines.contains(&Engine::FilteredStream) {
         log::info!("Enabling engine {}", Engine::FilteredStream);
         let client = client.clone();
+        let cache = cache.clone();
         Some(local_set.spawn_local(async move {
-            let mut router = Router::new(128 * 1024 * 1024).expect("Failed to load router");
+            let script = tokio::fs::read_to_string("route.js").await.expect("Failed to load router");
+            let mut router = Router::new(128 * 1024 * 1024, &script).expect("Failed to load router");
             loop {
-                client.run_stream(&mut router).await.err();
+                stream::run_line_loop(&client, &cache, &mut router).await.err();
             }
         }))
     } else {
@@ -79,9 +86,24 @@ async fn main() {
     let list_handle = if engines.contains(&Engine::List) {
         log::info!("Enabling engine {}", Engine::List);
         let client = client.clone();
+
+        let config_path = cache_dir.join("lists/config.toml");
+        let config = list::ListsConfig::from_config(config_path).await.expect("Failed to load config");
         Some(tokio::spawn(async move {
-            let e = client.run_list_loop().await.unwrap_err();
-            log::error!("List error: {}", e);
+            let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
+            log::info!("Started list fetch loop");
+
+            let mut catchup = true;
+            loop {
+                timer.tick().await;
+                log::debug!(
+                    "Running list fetch{}",
+                    if catchup { " (catch-up)" } else { "" }
+                );
+
+                list::run_list_once(&client, &config, catchup, &cache).await;
+                catchup = false;
+            }
         }))
     } else {
         None
@@ -89,11 +111,11 @@ async fn main() {
 
     let sig_handle = tokio::spawn(async move {
         let sigterm = sigterm.recv();
-        futures_util::pin_mut!(sigterm);
+        tokio::pin!(sigterm);
         let sigint = sigint.recv();
-        futures_util::pin_mut!(sigint);
+        tokio::pin!(sigint);
         let sigquit = sigquit.recv();
-        futures_util::pin_mut!(sigquit);
+        tokio::pin!(sigquit);
 
         futures_util::future::select_all([sigterm, sigint, sigquit]).await;
         if let Some(stream_handle) = &stream_handle {

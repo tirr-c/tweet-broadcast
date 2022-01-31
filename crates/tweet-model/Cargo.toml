@@ -1,0 +1,22 @@
+[package]
+name = "tweet-model"
+version = "0.3.0"
+authors = ["Wonwoo Choi <chwo9843@gmail.com>"]
+license = "MIT"
+edition = "2021"
+
+[dependencies]
+log = "0.4.14"
+thiserror = "1.0.30"
+
+[dependencies.chrono]
+version = "0.4.19"
+features = ["serde"]
+
+[dependencies.serde]
+version = "1.0.130"
+features = ["derive"]
+
+[dependencies.url]
+version = "2.2.2"
+features = ["serde"]

@@ -1,0 +1,25 @@
+[package]
+name = "tweet-route"
+version = "0.3.0"
+authors = ["Wonwoo Choi <chwo9843@gmail.com>"]
+license = "MIT"
+edition = "2021"
+
+[dependencies]
+chrono = "0.4.19"
+log = "0.4.14"
+serde_json = "1.0.69"
+serde_v8 = "0.19.0"
+thiserror = "1.0.30"
+v8 = "0.34.0"
+
+[dependencies.serde]
+version = "1.0.130"
+features = ["derive"]
+
+[dependencies.url]
+version = "2.2.2"
+features = ["serde"]
+
+[dependencies.tweet-model]
+path = "../tweet-model"

@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use super::tweet::model::{TweetPublicMetrics, UserPublicMetrics};
+use tweet_model::{TweetPublicMetrics, UserPublicMetrics};
 
 pub fn compute_score(
     tweet_metrics: &TweetPublicMetrics,

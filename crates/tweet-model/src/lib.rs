@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+pub mod cache;
+use cache::CacheItem;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tweet {
     id: String,
@@ -16,6 +19,12 @@ pub struct Tweet {
     possibly_sensitive: Option<bool>,
     #[serde(default)]
     referenced_tweets: Vec<ReferencedTweet>,
+}
+
+impl CacheItem for Tweet {
+    fn key(&self) -> &str {
+        self.id()
+    }
 }
 
 impl Tweet {
@@ -141,6 +150,12 @@ pub struct User {
     public_metrics: Option<UserPublicMetrics>,
 }
 
+impl CacheItem for User {
+    fn key(&self) -> &str {
+        self.id()
+    }
+}
+
 impl User {
     pub fn id(&self) -> &str {
         &self.id
@@ -192,6 +207,12 @@ pub struct Media {
     preview_image_url: Option<Url>,
 }
 
+impl CacheItem for Media {
+    fn key(&self) -> &str {
+        self.key()
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaType {
@@ -218,7 +239,7 @@ impl Media {
     }
 
     pub fn url(&self) -> Option<&Url> {
-        self.url.as_ref().or(self.preview_image_url.as_ref())
+        self.url.as_ref().or_else(|| self.preview_image_url.as_ref())
     }
 
     pub fn url_orig(&self) -> Option<Url> {
@@ -239,6 +260,24 @@ pub struct ResponseItem<Data, Meta = Option<()>> {
     pub includes: ResponseIncludes,
     #[serde(flatten)]
     pub meta: Meta,
+}
+
+impl<Data: cache::CacheItem, Meta> ResponseItem<Data, Meta> {
+    pub async fn cache_recursive<Cache>(&self, cache: &Cache) -> Result<(), Cache::Error> where
+        Cache: cache::StoreCache<Data> + cache::StoreCache<Tweet> + cache::StoreCache<User> + cache::StoreCache<Media>,
+    {
+        cache.store(&self.data).await?;
+        for tweet in &self.includes.tweets {
+            cache.store(tweet).await?;
+        }
+        for user in &self.includes.users {
+            cache.store(user).await?;
+        }
+        for media in &self.includes.media {
+            cache.store(media).await?;
+        }
+        Ok(())
+    }
 }
 
 impl<Data, Meta> ResponseItem<Data, Meta> {
