@@ -7,6 +7,7 @@ use tweet_fetch::TwitterClient;
 use tweet_route::Router;
 
 mod cache;
+mod image;
 mod list;
 mod stream;
 

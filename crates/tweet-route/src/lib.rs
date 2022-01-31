@@ -223,19 +223,24 @@ impl<'a> RouteResult<'a> {
     pub async fn cache_recursive<Cache>(&self, cache: &Cache) -> Result<(), Cache::Error> where
         Cache: StoreCache<model::Tweet> + StoreCache<model::User> + StoreCache<model::Media> + StoreCache<CacheData>,
     {
+        use futures_util::TryStreamExt;
+
         let payload = &self.payload;
-        cache.store(&CacheData::from(payload)).await?;
-        cache.store(payload.tweet).await?;
-        cache.store(payload.author).await?;
+
+        let futures = futures_util::stream::FuturesUnordered::new();
+        futures.push(cache.store(&CacheData::from(payload)));
+        futures.push(cache.store(payload.tweet));
+        futures.push(cache.store(payload.author));
         if let Some(tweet) = payload.original_tweet {
-            cache.store(tweet).await?;
+            futures.push(cache.store(tweet));
         }
         if let Some(author) = payload.original_author {
-            cache.store(author).await?;
+            futures.push(cache.store(author));
         }
         for &media in &payload.media {
-            cache.store(media).await?;
+            futures.push(cache.store(media));
         }
+        futures.try_collect::<Vec<_>>().await?;
         Ok(())
     }
 

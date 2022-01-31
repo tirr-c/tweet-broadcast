@@ -54,8 +54,10 @@ where
         } else {
             if !cached {
                 let ret = async {
-                    cache.store(&tweet_route::CacheData::from(payload)).await?;
-                    route_result.cache_recursive(cache).await?;
+                    futures_util::try_join!(
+                        cache.store(&tweet_route::CacheData::from(payload)),
+                        route_result.cache_recursive(cache),
+                    )?;
                     Ok::<_, Cache::Error>(())
                 }.await;
                 if let Err(e) = ret {

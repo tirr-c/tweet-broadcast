@@ -6,6 +6,7 @@ license = "MIT"
 edition = "2021"
 
 [dependencies]
+futures-util = "0.3.17"
 log = "0.4.14"
 thiserror = "1.0.30"
 

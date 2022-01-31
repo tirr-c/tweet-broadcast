@@ -1440,6 +1440,7 @@ name = "tweet-model"
 version = "0.3.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "log",
  "serde",
  "thiserror",
@@ -1451,6 +1452,7 @@ name = "tweet-route"
 version = "0.3.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "log",
  "serde",
  "serde_json",

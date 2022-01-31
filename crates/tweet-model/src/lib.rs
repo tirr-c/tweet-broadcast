@@ -266,16 +266,20 @@ impl<Data: cache::CacheItem, Meta> ResponseItem<Data, Meta> {
     pub async fn cache_recursive<Cache>(&self, cache: &Cache) -> Result<(), Cache::Error> where
         Cache: cache::StoreCache<Data> + cache::StoreCache<Tweet> + cache::StoreCache<User> + cache::StoreCache<Media>,
     {
-        cache.store(&self.data).await?;
+        use futures_util::TryStreamExt;
+
+        let futures = futures_util::stream::FuturesUnordered::new();
+        futures.push(cache.store(&self.data));
         for tweet in &self.includes.tweets {
-            cache.store(tweet).await?;
+            futures.push(cache.store(tweet));
         }
         for user in &self.includes.users {
-            cache.store(user).await?;
+            futures.push(cache.store(user));
         }
         for media in &self.includes.media {
-            cache.store(media).await?;
+            futures.push(cache.store(media));
         }
+        futures.try_collect::<Vec<_>>().await?;
         Ok(())
     }
 }
