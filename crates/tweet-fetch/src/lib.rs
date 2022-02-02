@@ -7,16 +7,23 @@ use reqwest::{
 
 use tweet_model as model;
 
-mod backoff;
+pub mod backoff;
 mod error;
+#[cfg(feature = "list")]
 mod list;
+#[cfg(feature = "search")]
+mod search;
+#[cfg(feature = "stream")]
 mod stream;
 #[macro_use]
 mod util;
 
 use concat_param;
 pub use error::Error;
+#[cfg(feature = "list")]
 pub use list::ListHead;
+#[cfg(feature = "search")]
+pub use search::{SearchHead, SearchPager};
 
 #[derive(Debug, Clone)]
 pub struct TwitterClient {
@@ -54,7 +61,7 @@ impl TwitterClient {
 impl TwitterClient {
     pub async fn retrieve(
         &self,
-        ids: &[&str],
+        ids: &[impl AsRef<str>],
     ) -> Result<model::ResponseItem<Vec<model::Tweet>>, Error> {
         use futures_util::{TryFutureExt, TryStreamExt};
 
@@ -65,7 +72,7 @@ impl TwitterClient {
         Ok(match ids {
             [] => Default::default(),
             [id] => {
-                url.path_segments_mut().unwrap().push(id);
+                url.path_segments_mut().unwrap().push(id.as_ref());
 
                 let res = self
                     .client
@@ -91,7 +98,13 @@ impl TwitterClient {
                 let mut req_fut = futures_util::stream::FuturesOrdered::new();
                 for ids in ids.chunks(100) {
                     // 100 tweets at a time
-                    let id_param = ids.join(",");
+                    let mut id_param = String::new();
+                    for (idx, id) in ids.iter().enumerate() {
+                        if idx != 0 {
+                            id_param.push(',');
+                        }
+                        id_param.push_str(id.as_ref());
+                    }
                     let mut url = url.clone();
                     url.query_pairs_mut().append_pair("ids", &id_param).finish();
 
@@ -125,6 +138,7 @@ impl TwitterClient {
         })
     }
 
+    #[cfg(feature = "stream")]
     pub fn make_stream(&self) -> impl futures_util::Stream<Item = Result<model::ResponseItem<model::Tweet, model::StreamMeta>, Error>> {
         stream::make_stream(self.clone())
     }

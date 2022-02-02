@@ -9,12 +9,14 @@ use tweet_route::Router;
 mod cache;
 mod image;
 mod list;
+mod search;
 mod stream;
 
 #[derive(Debug, PartialEq, Eq, Hash, strum::EnumString, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 enum Engine {
     FilteredStream,
+    Search,
     List,
 }
 
@@ -81,7 +83,94 @@ async fn main() {
             let script = tokio::fs::read_to_string("route.js").await.expect("Failed to load router");
             let mut router = Router::new(128 * 1024 * 1024, &script).expect("Failed to load router");
             loop {
-                stream::run_line_loop(&client, &cache, &mut router).await.err();
+                if let Err(e) = stream::run_line_loop(&client, &cache, &mut router).await {
+                    log::error!("Stream error: {}", e);
+                }
+            }
+        }))
+    } else {
+        None
+    };
+    let search_handle = if engines.contains(&Engine::Search) {
+        log::info!("Enabling engine {}", Engine::Search);
+        let client = client.clone();
+        let cache = cache.clone();
+
+        let config_path = cache_dir.join("searches/config.toml");
+        let config = search::SearchConfig::from_config(config_path).await.expect("Failed to load config");
+
+        Some(tokio::spawn(async move {
+            let mut tracker = search::TrendingContext::new();
+
+            log::info!("Initializing search terms");
+            let mut heads = std::collections::HashMap::new();
+            for term in config.terms() {
+                let mut head = tweet_fetch::SearchHead::new(term.term.to_owned(), None);
+                match head.fetch(&client).await {
+                    Ok(tweet_model::ResponseItem {
+                        data: tweets,
+                        includes,
+                        ..
+                    }) => {
+                        if term.trending {
+                            for tweet in &tweets {
+                                tracker.insert(tweet, &includes, term.webhooks);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        log::error!("Search init failed: {}", e);
+                        sentry::capture_error(&e);
+                        continue;
+                    },
+                };
+                heads.insert(term.id.to_owned(), head);
+            }
+
+            let mut timer = tokio::time::interval(std::time::Duration::from_secs(30));
+            let mut tick_count = 0;
+
+            log::info!("Started search loop");
+            loop {
+                timer.tick().await;
+                tick_count += 1;
+
+                if tick_count % 6 == 0 {
+                    tick_count = 0;
+                    log::trace!("Running search fetch");
+
+                    for term in config.terms() {
+                        let id = term.id.to_owned();
+                        let trending = term.trending;
+                        let webhooks = term.webhooks;
+                        let head = heads.get_mut(&id).unwrap();
+
+                        match head.fetch(&client).await {
+                            Ok(tweet_model::ResponseItem {
+                                data: tweets,
+                                includes,
+                                ..
+                            }) => {
+                                if trending {
+                                    for tweet in &tweets {
+                                        tracker.insert(tweet, &includes, webhooks);
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                log::error!("Search failed: {}", e);
+                                sentry::capture_error(&e);
+                                continue;
+                            },
+                        };
+                    }
+                }
+
+                log::trace!("Running tracker update");
+                if let Err(e) = tracker.run_once(&client, &cache).await {
+                    log::error!("Tracking failed: {}", e);
+                    sentry::capture_error(AsRef::<dyn std::error::Error + 'static>::as_ref(&e));
+                }
             }
         }))
     } else {
@@ -125,11 +214,17 @@ async fn main() {
         if let Some(stream_handle) = &stream_handle {
             stream_handle.abort();
         }
+        if let Some(search_handle) = &search_handle {
+            search_handle.abort();
+        }
         if let Some(list_handle) = &list_handle {
             list_handle.abort();
         }
         if let Some(stream_handle) = stream_handle {
             stream_handle.await.err();
+        }
+        if let Some(search_handle) = search_handle {
+            search_handle.await.err();
         }
         if let Some(list_handle) = list_handle {
             list_handle.await.err();

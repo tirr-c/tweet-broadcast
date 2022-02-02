@@ -75,11 +75,21 @@ impl FsCache {
 
         let path = path.to_string_lossy();
         log::debug!("Downloading {} into {}", url, path);
-        let mut res = client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?;
+
+        let mut backoff = tweet_fetch::backoff::Backoff::new();
+        let mut res = backoff.run_fn(|| {
+            let url = url.clone();
+            async {
+                let res = client
+                    .get(url)
+                    .send()
+                    .await;
+                match res {
+                    Ok(res) => Ok(res.error_for_status()),
+                    Err(_) => Err(tweet_fetch::backoff::BackoffType::Network),
+                }
+            }
+        }).await?;
         while let Some(bytes) = res.chunk().await? {
             file.write(&bytes).await?;
         }

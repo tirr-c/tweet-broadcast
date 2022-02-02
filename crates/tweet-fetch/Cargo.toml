@@ -1,26 +1,28 @@
 [package]
 name = "tweet-fetch"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Wonwoo Choi <chwo9843@gmail.com>"]
 license = "MIT"
 edition = "2021"
 
 [dependencies]
-async-stream = "0.3.2"
 bytes = "1.1.0"
 futures-util = "0.3.17"
 log = "0.4.14"
-serde_json = "1.0.69"
 thiserror = "1.0.30"
+
+[dependencies.async-stream]
+version = "0.3.2"
+optional = true
 
 [dependencies.reqwest]
 version = "0.11.6"
 default-features = false
 features = ["rustls-tls", "gzip", "brotli", "stream"]
 
-[dependencies.serde]
-version = "1.0.130"
-features = ["derive"]
+[dependencies.serde_json]
+version = "1.0.69"
+optional = true
 
 [dependencies.tokio]
 version = "1.13.0"
@@ -32,3 +34,9 @@ path = "../tweet-model"
 
 [dependencies.tweet-route]
 path = "../tweet-route"
+
+[features]
+default = ["list", "search", "stream"]
+list = []
+search = []
+stream = ["async-stream", "serde_json"]

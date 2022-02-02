@@ -2,7 +2,7 @@ use futures_util::future::BoxFuture;
 
 #[non_exhaustive]
 pub struct Backoff {
-    backoff_fn: Box<dyn FnMut(std::time::Duration) -> BoxFuture<'static, ()>>,
+    backoff_fn: Box<dyn FnMut(std::time::Duration) -> BoxFuture<'static, ()> + Send>,
 }
 
 impl std::fmt::Debug for Backoff {
@@ -21,7 +21,7 @@ impl Default for Backoff {
 
 impl Backoff {
     fn default_backoff_fn(duration: std::time::Duration) -> BoxFuture<'static, ()> {
-        log::info!("Waiting {} ms...", duration.as_millis());
+        log::debug!("Waiting {} ms...", duration.as_millis());
         let sleep = tokio::time::sleep(duration);
         Box::pin(sleep)
     }
@@ -32,7 +32,7 @@ impl Backoff {
 
     pub fn backoff_fn(
         &mut self,
-        f: impl FnMut(std::time::Duration) -> BoxFuture<'static, ()> + 'static,
+        f: impl FnMut(std::time::Duration) -> BoxFuture<'static, ()> + Send + 'static,
     ) {
         self.backoff_fn = Box::new(f);
     }

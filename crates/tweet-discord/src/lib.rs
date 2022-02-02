@@ -22,18 +22,22 @@ pub async fn send_webhook(
     };
     let author = includes.get_user(tweet_data.author_id().unwrap()).unwrap();
 
-    let payload_media = tweet_data
-        .media_keys()
-        .iter()
-        .map(|key| {
-            let media = includes.get_media(key).unwrap();
-            serde_json::json!({
-                "url": media.url_orig(),
-                "width": media.width(),
-                "height": media.height(),
+    let payload_media = if tweet_data.possibly_sensitive() {
+        Vec::new()
+    } else {
+        tweet_data
+            .media_keys()
+            .iter()
+            .map(|key| {
+                let media = includes.get_media(key).unwrap();
+                serde_json::json!({
+                    "url": media.url_orig(),
+                    "width": media.width(),
+                    "height": media.height(),
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    };
 
     let mut payload_embed = vec![serde_json::json!({
         "author": {
@@ -58,10 +62,16 @@ pub async fn send_webhook(
             .skip(1),
     );
 
+    let content = format!(
+        "{}https://twitter.com/{}/status/{}",
+        if tweet_data.possibly_sensitive() { "\u{26a0} Possibly sensitive\n" } else { "" },
+        author.username(),
+        tweet_data.id(),
+    );
     let payload = serde_json::json!({
         "username": format!("{} (@{})", original_author.name(), original_author.username()),
         "avatar_url": original_author.profile_image_url_orig(),
-        "content": format!("https://twitter.com/{}/status/{}", author.username(), tweet_data.id()),
+        "content": content,
         "embeds": payload_embed,
     });
 

@@ -385,7 +385,7 @@ pub struct ListMeta {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ListMetaInner {
+struct ListMetaInner {
     result_count: i32,
     previous_token: Option<String>,
     next_token: Option<String>,
@@ -398,6 +398,37 @@ impl ListMeta {
 
     pub fn previous_token(&self) -> Option<&str> {
         self.meta.previous_token.as_deref()
+    }
+
+    pub fn next_token(&self) -> Option<&str> {
+        self.meta.next_token.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SearchMeta {
+    meta: SearchMetaInner,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct SearchMetaInner {
+    result_count: i32,
+    newest_id: Option<String>,
+    oldest_id: Option<String>,
+    next_token: Option<String>,
+}
+
+impl SearchMeta {
+    pub fn result_count(&self) -> i32 {
+        self.meta.result_count
+    }
+
+    pub fn newest_id(&self) -> Option<&str> {
+        self.meta.newest_id.as_deref()
+    }
+
+    pub fn oldest_id(&self) -> Option<&str> {
+        self.meta.oldest_id.as_deref()
     }
 
     pub fn next_token(&self) -> Option<&str> {

@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use tweet_model as model;
 use crate::{
     util,
@@ -23,30 +21,6 @@ impl tweet_model::cache::CacheItem for ListHead {
 impl ListHead {
     pub fn new(id: String, head: Option<String>) -> Self {
         Self { id, head }
-    }
-
-    pub async fn from_cache_dir(id: String, cache_dir: impl AsRef<Path>) -> Result<Self, Error> {
-        let cache_dir = cache_dir.as_ref();
-        let head = tokio::fs::read_to_string(cache_dir.join(format!("lists/{}", id))).await;
-        let head = match head {
-            Ok(head) => Some(head),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
-        Ok(Self { id, head })
-    }
-
-    pub async fn save_cache(&self, cache_dir: impl AsRef<Path>) -> Result<(), Error> {
-        let cache_dir = cache_dir.as_ref();
-        let path = cache_dir.join(format!("lists/{}", self.id));
-        if let Some(head) = &self.head {
-            tokio::fs::write(path, head.as_bytes()).await?;
-        } else if let Err(e) = tokio::fs::remove_file(path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(e.into());
-            }
-        }
-        Ok(())
     }
 }
 

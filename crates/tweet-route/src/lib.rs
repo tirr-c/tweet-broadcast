@@ -7,6 +7,7 @@ mod error;
 mod score;
 
 pub use error::Error;
+pub use score::compute_score;
 
 fn load_script(
     isolate: &mut v8::OwnedIsolate,
