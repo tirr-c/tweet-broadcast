@@ -21,14 +21,16 @@ struct SearchTermMetaInner {
     term: String,
     #[serde(default)]
     trending: bool,
+    score_threshold: Option<f64>,
     webhooks: Vec<reqwest::Url>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct SearchTermMeta<'a> {
     pub id: &'a str,
     pub term: &'a str,
     pub trending: bool,
+    pub score_threshold: f64,
     pub webhooks: &'a [reqwest::Url],
 }
 
@@ -46,6 +48,7 @@ impl SearchConfig {
                 id,
                 term: &meta.term,
                 trending: meta.trending,
+                score_threshold: meta.score_threshold.unwrap_or(15.0),
                 webhooks: &meta.webhooks,
             })
     }
@@ -56,7 +59,7 @@ struct TrendingEntry<'a> {
     check_due_at: DateTime<Utc>,
     tweet_id: String,
     created_at: DateTime<Utc>,
-    webhooks: &'a [reqwest::Url],
+    search_config: SearchTermMeta<'a>,
     previous_score: f64,
     penalty: u32,
 }
@@ -103,16 +106,16 @@ impl<'conf> TrendingContext<'conf> {
         &mut self,
         tweet: &model::Tweet,
         includes: &model::ResponseIncludes,
-        notify_webhooks: &'conf [reqwest::Url],
+        search_config: SearchTermMeta<'conf>,
     ) {
-        self.insert_inner(tweet, includes, notify_webhooks, None, None)
+        self.insert_inner(tweet, includes, search_config, None, None)
     }
 
     fn insert_inner(
         &mut self,
         tweet: &model::Tweet,
         includes: &model::ResponseIncludes,
-        notify_webhooks: &'conf [reqwest::Url],
+        search_config: SearchTermMeta<'conf>,
         previous_entry: Option<&TrendingEntry<'conf>>,
         score: Option<f64>,
     ) {
@@ -169,7 +172,7 @@ impl<'conf> TrendingContext<'conf> {
             check_due_at,
             tweet_id,
             created_at,
-            webhooks: notify_webhooks,
+            search_config,
             previous_score: score.unwrap_or(0.0),
             penalty,
         };
@@ -227,9 +230,9 @@ impl<'conf> TrendingContext<'conf> {
                 created_at,
             );
             let &entry = entry_map.get(tweet.id()).unwrap();
-            let webhooks = entry.webhooks;
+            let webhooks = entry.search_config.webhooks;
 
-            if score > 30.0 {
+            if score >= entry.search_config.score_threshold {
                 log::debug!(
                     "Relaying tweet {id} by @{author_username}, score: {score:.4}",
                     id = tweet.id(),
@@ -264,7 +267,7 @@ impl<'conf> TrendingContext<'conf> {
             }
 
             // insert again
-            self.insert_inner(tweet, &includes, webhooks, Some(entry), Some(score));
+            self.insert_inner(tweet, &includes, entry.search_config, Some(entry), Some(score));
         }
         futures_util::try_join!(
             cache_futures.try_collect::<Vec<_>>().map_err(eyre::Report::new),

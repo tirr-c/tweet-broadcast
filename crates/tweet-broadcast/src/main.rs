@@ -114,7 +114,7 @@ async fn main() {
                     }) => {
                         if term.trending {
                             for tweet in &tweets {
-                                tracker.insert(tweet, &includes, term.webhooks);
+                                tracker.insert(tweet, &includes, term);
                             }
                         }
                     },
@@ -142,7 +142,6 @@ async fn main() {
                     for term in config.terms() {
                         let id = term.id.to_owned();
                         let trending = term.trending;
-                        let webhooks = term.webhooks;
                         let head = heads.get_mut(&id).unwrap();
 
                         match head.fetch(&client).await {
@@ -153,7 +152,7 @@ async fn main() {
                             }) => {
                                 if trending {
                                     for tweet in &tweets {
-                                        tracker.insert(tweet, &includes, webhooks);
+                                        tracker.insert(tweet, &includes, term);
                                     }
                                 }
                             },
