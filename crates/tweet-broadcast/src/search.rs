@@ -257,11 +257,15 @@ impl<'conf> TrendingContext<'conf> {
             }
 
             let elapsed = now - created_at;
-            if score < 2.0 && elapsed >= chrono::Duration::hours(3) {
+            if score < 0.01 && elapsed >= chrono::Duration::hours(3) {
                 log::debug!("Tweet {}: untracking (score: {:.4})", tweet.id(), score);
                 continue;
             }
-            if score >= 2.0 && elapsed >= chrono::Duration::days(2) {
+            if score < 2.0 && elapsed >= chrono::Duration::hours(12) {
+                log::debug!("Tweet {}: untracking (score: {:.4})", tweet.id(), score);
+                continue;
+            }
+            if elapsed >= chrono::Duration::days(3) {
                 log::debug!("Tweet {}: untracking (score: {:.4})", tweet.id(), score);
                 continue;
             }
