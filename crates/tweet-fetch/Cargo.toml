@@ -36,7 +36,8 @@ path = "../tweet-model"
 path = "../tweet-route"
 
 [features]
-default = ["list", "search", "stream"]
+default = ["list", "search", "stream", "user"]
 list = []
 search = []
 stream = ["async-stream", "serde_json"]
+user = []

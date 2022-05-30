@@ -15,6 +15,8 @@ mod list;
 mod search;
 #[cfg(feature = "stream")]
 mod stream;
+#[cfg(feature = "user")]
+mod user;
 #[macro_use]
 mod util;
 
@@ -24,6 +26,8 @@ pub use error::Error;
 pub use list::ListHead;
 #[cfg(feature = "search")]
 pub use search::{SearchHead, SearchPager};
+#[cfg(feature = "user")]
+pub use user::UserTimelineHead;
 
 #[derive(Debug, Clone)]
 pub struct TwitterClient {

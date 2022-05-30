@@ -11,6 +11,7 @@ mod image;
 mod list;
 mod search;
 mod stream;
+mod user;
 
 #[derive(Debug, PartialEq, Eq, Hash, strum::EnumString, strum::Display)]
 #[strum(serialize_all = "snake_case")]
@@ -18,6 +19,7 @@ enum Engine {
     FilteredStream,
     Search,
     List,
+    User,
 }
 
 #[derive(Debug, Parser)]
@@ -25,8 +27,8 @@ enum Engine {
 struct Args {
     #[clap(short, long, env = "TWITTER_CACHE", default_value = "./.tweets")]
     cache: std::path::PathBuf,
-    #[clap(long, env = "TWITTER_SAVE_IMAGES")]
-    save_images: bool,
+    #[clap(long, env = "TWITTER_NO_SAVE_IMAGES")]
+    no_save_images: bool,
     #[clap(short, long = "engine")]
     engines: Vec<Engine>,
 }
@@ -35,7 +37,7 @@ struct Args {
 async fn main() {
     let Args {
         cache: cache_dir,
-        save_images,
+        no_save_images,
         mut engines,
     } = Args::parse();
 
@@ -59,7 +61,7 @@ async fn main() {
         },
     ));
 
-    let cache = cache::FsCache::new(&cache_dir, save_images);
+    let cache = cache::FsCache::new(&cache_dir, no_save_images).await;
     let client = TwitterClient::new(token);
 
     let platform = v8::Platform::new(0, false).make_shared();
@@ -178,6 +180,7 @@ async fn main() {
     let list_handle = if engines.contains(&Engine::List) {
         log::info!("Enabling engine {}", Engine::List);
         let client = client.clone();
+        let cache = cache.clone();
 
         let config_path = cache_dir.join("lists/config.toml");
         let config = list::ListsConfig::from_config(config_path).await.expect("Failed to load config");
@@ -194,6 +197,31 @@ async fn main() {
                 );
 
                 list::run_list_once(&client, &config, catchup, &cache).await;
+                catchup = false;
+            }
+        }))
+    } else {
+        None
+    };
+    let user_handle = if engines.contains(&Engine::User) {
+        log::info!("Enabling engine {}", Engine::User);
+        let client = client.clone();
+
+        let config_path = cache_dir.join("users/config.toml");
+        let config = user::UsersConfig::from_config(config_path).await.expect("Failed to load config");
+        Some(tokio::spawn(async move {
+            let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
+            log::info!("Started user timeline fetch loop");
+
+            let mut catchup = true;
+            loop {
+                timer.tick().await;
+                log::debug!(
+                    "Running user timeline fetch{}",
+                    if catchup { " (catch-up)" } else { "" }
+                );
+
+                user::run_list_once(&client, &config, catchup, &cache).await;
                 catchup = false;
             }
         }))
@@ -219,6 +247,9 @@ async fn main() {
         if let Some(list_handle) = &list_handle {
             list_handle.abort();
         }
+        if let Some(user_handle) = &user_handle {
+            user_handle.abort();
+        }
         if let Some(stream_handle) = stream_handle {
             stream_handle.await.err();
         }
@@ -227,6 +258,9 @@ async fn main() {
         }
         if let Some(list_handle) = list_handle {
             list_handle.await.err();
+        }
+        if let Some(user_handle) = user_handle {
+            user_handle.await.err();
         }
     });
 

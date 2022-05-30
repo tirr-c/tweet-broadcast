@@ -239,7 +239,7 @@ impl Media {
     }
 
     pub fn url(&self) -> Option<&Url> {
-        self.url.as_ref().or_else(|| self.preview_image_url.as_ref())
+        self.url.as_ref().or(self.preview_image_url.as_ref())
     }
 
     pub fn url_orig(&self) -> Option<Url> {

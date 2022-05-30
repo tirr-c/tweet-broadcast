@@ -98,7 +98,7 @@ impl Router {
         let author_id = tweet.author_id().unwrap();
         let author = includes.get_user(author_id).unwrap();
 
-        let has_cache = cache.has(&tweet.id().to_owned()).await.unwrap_or(false);
+        let has_cache = cache.has(tweet.id()).await.unwrap_or(false);
 
         let tweet_metrics = tweet.metrics().unwrap();
         let user_metrics = author.metrics().unwrap();

@@ -1,3 +1,4 @@
+use chrono::{Duration, Utc};
 use futures_util::future::BoxFuture;
 
 use tweet_model::{
@@ -8,20 +9,90 @@ use tweet_model::{
 #[derive(Debug, Clone)]
 pub struct FsCache {
     dir: std::path::PathBuf,
-    client: Option<reqwest::Client>,
+    remote: Option<RemoteConfig>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct RemoteConfig {
+    endpoint: reqwest::Url,
+    signing_key: String,
+    #[serde(default)]
+    no_save_images: bool,
+    #[serde(skip, default)]
+    client: reqwest::Client,
+}
+
+impl std::fmt::Debug for RemoteConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteConfig").field("endpoint", &self.endpoint).finish_non_exhaustive()
+    }
+}
+
+impl RemoteConfig {
+    fn sign(&self, message: &[u8]) -> (ring::hmac::Tag, i64) {
+        let now = Utc::now();
+        let expires_at = now + Duration::seconds(30);
+        let expires_at_ts = expires_at.timestamp_millis();
+
+        let mut sign_message = expires_at_ts.to_string().as_bytes().to_vec();
+        sign_message.extend_from_slice(message);
+
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, self.signing_key.as_bytes());
+        let tag = ring::hmac::sign(&key, &sign_message);
+        (tag, expires_at_ts)
+    }
+
+    fn download_tweet_media(&self, id: &str) -> reqwest::Request {
+        let body = serde_json::json!({ "id": id });
+        let body = serde_json::to_vec(&body).unwrap();
+        let (tag, timestamp) = self.sign(&body);
+
+        let mut request = reqwest::Request::new(reqwest::Method::POST, self.endpoint.clone());
+        let headers = request.headers_mut();
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-timestamp"),
+            timestamp.to_string().parse().unwrap(),
+        );
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-signature"),
+            base64::encode(tag.as_ref()).parse().unwrap(),
+        );
+        *request.body_mut() = Some(body.into());
+
+        request
+    }
 }
 
 impl FsCache {
-    pub fn new(path: impl Into<std::path::PathBuf>, save_images: bool) -> Self {
-        let client = if save_images {
-            log::info!("Media downloading enabled");
-            Some(reqwest::Client::builder().build().unwrap())
-        } else {
-            None
+    pub async fn new(path: impl Into<std::path::PathBuf>, no_save_images: bool) -> Self {
+        let dir = path.into();
+        let remote = {
+            let config_path = dir.join("remote.toml");
+            match tokio::fs::read(config_path).await {
+                Ok(buf) => {
+                    match toml::from_slice::<RemoteConfig>(&buf) {
+                        Ok(mut remote) => {
+                            remote.no_save_images &= no_save_images;
+                            Some(remote)
+                        },
+                        Err(e) => {
+                            log::error!("Failed to read remote.toml: {}", e);
+                            None
+                        },
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    None
+                },
+                Err(e) => {
+                    log::error!("Failed to read remote.toml: {}", e);
+                    None
+                },
+            }
         };
         Self {
-            dir: path.into(),
-            client,
+            dir,
+            remote,
         }
     }
 
@@ -32,69 +103,6 @@ impl FsCache {
     async fn ensure_dir(&self, dir: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
         let path = self.dir.join(dir);
         tokio::fs::create_dir_all(path).await?;
-        Ok(())
-    }
-}
-
-impl FsCache {
-    pub async fn store_image(
-        &self,
-        media: &tweet_model::Media,
-    ) -> Result<(), FsError> {
-        use tokio::io::AsyncWriteExt;
-
-        let client = if let Some(client) = &self.client {
-            client
-        } else {
-            return Ok(());
-        };
-
-        self.ensure_dir("images").await?;
-        let url = if let Some(url) = media.url_orig() {
-            url
-        } else {
-            return Ok(());
-        };
-        let filename = AsRef::<std::path::Path>::as_ref(url.path());
-        let ext = filename.extension();
-        let mut filename = std::path::PathBuf::from(media.key());
-        filename.set_extension(ext.unwrap_or(&std::ffi::OsString::new()));
-        let path = self.dir.join("images").join(filename);
-
-        let file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await;
-        let mut file = match file {
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Ok(());
-            },
-            file => file?,
-        };
-
-        let path = path.to_string_lossy();
-        log::debug!("Downloading {} into {}", url, path);
-
-        let mut backoff = tweet_fetch::backoff::Backoff::new();
-        let mut res = backoff.run_fn(|| {
-            let url = url.clone();
-            async {
-                let res = client
-                    .get(url)
-                    .send()
-                    .await;
-                match res {
-                    Ok(res) => Ok(res.error_for_status()),
-                    Err(_) => Err(tweet_fetch::backoff::BackoffType::Network),
-                }
-            }
-        }).await?;
-        while let Some(bytes) = res.chunk().await? {
-            file.write(&bytes).await?;
-        }
-        file.flush().await?;
-        log::debug!("Download done: {}", path);
         Ok(())
     }
 }
@@ -114,7 +122,7 @@ impl Cache for FsCache {
 }
 
 macro_rules! impl_cache {
-    ($it:ty, $base:literal) => {
+    ($it:ty, $base:literal, load) => {
         impl LoadCache<$it> for FsCache {
             fn load(&self, key: &str) -> BoxFuture<'_, Result<$it, Self::Error>> {
                 let path = self.subpath(format!(concat!($base, "/{}.json"), key));
@@ -136,7 +144,8 @@ macro_rules! impl_cache {
                 })
             }
         }
-
+    };
+    ($it:ty, $base:literal, store) => {
         impl StoreCache<$it> for FsCache {
             fn store(&self, item: &$it) -> BoxFuture<'_, Result<String, Self::Error>> {
                 let key = item.key().to_owned();
@@ -150,58 +159,59 @@ macro_rules! impl_cache {
             }
         }
     };
+    ($it:ty, $base:literal) => {
+        impl_cache!($it, $base, load);
+        impl_cache!($it, $base, store);
+    };
 }
 
-impl_cache!(model::Tweet, "tweets");
-impl_cache!(model::User, "users");
-impl_cache!(tweet_route::CacheData, "stream");
-
-impl LoadCache<model::Media> for FsCache {
-    fn load(&self, key: &str) -> BoxFuture<'_, Result<model::Media, Self::Error>> {
-        let path = self.subpath(format!("media/{}.json", key));
-        Box::pin(async {
-            let v = tokio::fs::read(path).await?;
-            let data = serde_json::from_slice::<model::Media>(&v)?;
-            Ok(data)
-        })
-    }
-
-    fn has(&self, key: &str) -> BoxFuture<'_, Result<bool, Self::Error>> {
-        let path = self.subpath(format!("media/{}.json", key));
-        Box::pin(async {
-            match tokio::fs::metadata(path).await {
-                Ok(_) => Ok(true),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(e) => Err(e.into()),
-            }
-        })
-    }
-}
-
-impl StoreCache<model::Media> for FsCache {
-    fn store(&self, item: &model::Media) -> BoxFuture<'_, Result<String, Self::Error>> {
-        if self.client.is_some() {
-            let cache = self.clone();
-            let item = item.clone();
+impl_cache!(model::Tweet, "tweets", load);
+impl StoreCache<model::Tweet> for FsCache {
+    fn store(&self, item: &model::Tweet) -> BoxFuture<'_, Result<String, Self::Error>> {
+        if let Some(remote) = &self.remote {
+            let id = item.id().to_owned();
+            let remote_media_save = remote.download_tweet_media(&id);
+            let client = remote.client.clone();
             tokio::spawn(async move {
-                if let Err(e) = cache.store_image(&item).await {
-                    log::error!("Media download failed: {}", e);
-                    sentry::capture_error(&e);
+                let ret: Result<_, reqwest::Error> = async {
+                    let res = client.execute(remote_media_save).await?;
+                    let status = res.status();
+                    let body = res.text().await?;
+                    Ok((status, body))
+                }.await;
+                match ret {
+                    Ok((status, body)) => {
+                        if status != reqwest::StatusCode::OK {
+                            log::error!(
+                                "Remote download returned error for tweet ID {}: {}, {}",
+                                id,
+                                status,
+                                body,
+                            );
+                        }
+                        log::debug!("Remote download done for tweet ID {}", id);
+                    },
+                    Err(err) => {
+                        log::error!("Remote download request failed: {}", err);
+                    },
                 }
             });
         }
 
         let key = item.key().to_owned();
-        let path = self.subpath(format!("media/{}.json", key));
+        let path = self.subpath(format!("tweets/{}.json", key));
         let v = serde_json::to_vec(item).unwrap();
         Box::pin(async {
-            self.ensure_dir("media").await?;
+            self.ensure_dir("tweets").await?;
             tokio::fs::write(path, v).await?;
-
             Ok(key)
         })
     }
 }
+
+impl_cache!(model::User, "users");
+impl_cache!(model::Media, "media");
+impl_cache!(tweet_route::CacheData, "stream");
 
 impl LoadCache<tweet_fetch::ListHead> for FsCache {
     fn load(&self, key: &str) -> BoxFuture<'_, Result<tweet_fetch::ListHead, Self::Error>> {
@@ -237,6 +247,52 @@ impl StoreCache<tweet_fetch::ListHead> for FsCache {
         let path = self.subpath(format!("lists/{}", key));
         Box::pin(async {
             self.ensure_dir("lists").await?;
+            if let Some(head) = head {
+                tokio::fs::write(path, head.as_bytes()).await?;
+            } else if let Err(e) = tokio::fs::remove_file(path).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(e.into());
+                }
+            }
+            Ok(key)
+        })
+    }
+}
+
+impl LoadCache<tweet_fetch::UserTimelineHead> for FsCache {
+    fn load(&self, key: &str) -> BoxFuture<'_, Result<tweet_fetch::UserTimelineHead, Self::Error>> {
+        let key = key.to_owned();
+        let path = self.subpath(format!("users/{}", key));
+        Box::pin(async {
+            let head = tokio::fs::read_to_string(path).await;
+            let head = match head {
+                Ok(head) => Some(head),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e.into()),
+            };
+            Ok(tweet_fetch::UserTimelineHead::new(key, head))
+        })
+    }
+
+    fn has(&self, key: &str) -> BoxFuture<'_, Result<bool, Self::Error>> {
+        let path = self.subpath(format!("users/{}", key));
+        Box::pin(async {
+            match tokio::fs::metadata(path).await {
+                Ok(_) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e.into()),
+            }
+        })
+    }
+}
+
+impl StoreCache<tweet_fetch::UserTimelineHead> for FsCache {
+    fn store(&self, item: &tweet_fetch::UserTimelineHead) -> BoxFuture<'_, Result<String, Self::Error>> {
+        let key = item.key().to_owned();
+        let head = item.head().map(|s| s.to_owned());
+        let path = self.subpath(format!("users/{}", key));
+        Box::pin(async {
+            self.ensure_dir("users").await?;
             if let Some(head) = head {
                 tokio::fs::write(path, head.as_bytes()).await?;
             } else if let Err(e) = tokio::fs::remove_file(path).await {
