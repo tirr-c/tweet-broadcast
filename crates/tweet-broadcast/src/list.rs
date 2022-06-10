@@ -12,6 +12,8 @@ use tweet_model::{
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListMeta {
+    #[serde(default)]
+    cache_tweets: bool,
     webhooks: Vec<reqwest::Url>,
 }
 
@@ -76,7 +78,7 @@ async fn send_catchup_webhook(
     Ok(())
 }
 
-pub async fn run_list_once<Cache: LoadCache<ListHead> + StoreCache<ListHead>>(
+pub async fn run_list_once<Cache: LoadCache<ListHead> + StoreCache<ListHead> + StoreCache<model::Tweet>>(
     client: &TwitterClient,
     config: &ListsConfig,
     catchup: bool,
@@ -114,6 +116,16 @@ pub async fn run_list_once<Cache: LoadCache<ListHead> + StoreCache<ListHead>>(
                 ..
             } = &tweets;
 
+            let cache_fut = futures_util::stream::FuturesUnordered::new();
+            if meta.cache_tweets {
+                for tweet in tweets {
+                    cache_fut.push(async move {
+                        cache.store(tweet).await?;
+                        Ok::<_, eyre::Error>(())
+                    });
+                }
+            }
+
             let webhooks_fut = futures_util::stream::FuturesUnordered::new();
             for webhook in meta.webhooks() {
                 let webhook_client = &webhook_client;
@@ -144,8 +156,18 @@ pub async fn run_list_once<Cache: LoadCache<ListHead> + StoreCache<ListHead>>(
                 });
             }
 
-            let ret = webhooks_fut.try_collect::<()>().await;
-            if let Err(e) = ret {
+            let (cache_ret, webhooks_ret) = futures_util::join!(
+                cache_fut.try_collect::<()>(),
+                webhooks_fut.try_collect::<()>(),
+            );
+            if let Err(e) = cache_ret {
+                log::error!("Failed to cache tweets: {}", e);
+                let mut event = sentry::event_from_error(AsRef::<dyn std::error::Error + 'static>::as_ref(&e));
+                event.tags.insert(String::from("list_id"), id.into());
+                sentry::capture_event(event);
+                return;
+            }
+            if let Err(e) = webhooks_ret {
                 log::error!("Failed to send webhook for {}: {}", id, e);
                 let mut event = sentry::event_from_error(AsRef::<dyn std::error::Error + 'static>::as_ref(&e));
                 event.tags.insert(String::from("id"), id.into());
