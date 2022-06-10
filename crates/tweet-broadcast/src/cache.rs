@@ -45,13 +45,13 @@ impl RemoteConfig {
     fn download_tweet_media(&self, id: &str) -> reqwest::Request {
         let body = serde_json::json!({ "id": id });
         let body = serde_json::to_vec(&body).unwrap();
-        let (tag, timestamp) = self.sign(&body);
+        let (tag, expires_at_ts) = self.sign(&body);
 
         let mut request = reqwest::Request::new(reqwest::Method::POST, self.endpoint.clone());
         let headers = request.headers_mut();
         headers.insert(
-            reqwest::header::HeaderName::from_static("x-timestamp"),
-            timestamp.to_string().parse().unwrap(),
+            reqwest::header::HeaderName::from_static("x-expires"),
+            expires_at_ts.to_string().parse().unwrap(),
         );
         headers.insert(
             reqwest::header::HeaderName::from_static("x-signature"),
@@ -72,7 +72,7 @@ impl FsCache {
                 Ok(buf) => {
                     match toml::from_slice::<RemoteConfig>(&buf) {
                         Ok(mut remote) => {
-                            remote.no_save_images &= no_save_images;
+                            remote.no_save_images |= no_save_images;
                             Some(remote)
                         },
                         Err(e) => {
