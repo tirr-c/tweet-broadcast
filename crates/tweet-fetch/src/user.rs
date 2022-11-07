@@ -1,3 +1,4 @@
+use model::ResponseItem;
 use tweet_model as model;
 use crate::{
     util,
@@ -120,11 +121,17 @@ async fn load_timeline_since(
                 .get(url)
                 .send()
                 .await?
-                .json::<model::TwitterResponse<Vec<model::Tweet>, model::ListMeta>>()
+                .json::<model::TwitterResponse<Option<Vec<model::Tweet>>, model::ListMeta>>()
                 .await?;
             let base_ret = match base_ret {
                 model::TwitterResponse::Error(err) => return Err(err.into()),
-                model::TwitterResponse::Ok(ret) => ret,
+                model::TwitterResponse::Ok(ResponseItem { data, includes, meta }) => {
+                    ResponseItem {
+                        data: data.unwrap_or_default(),
+                        includes,
+                        meta,
+                    }
+                },
             };
             Result::<_, Error>::Ok(base_ret)
         }
