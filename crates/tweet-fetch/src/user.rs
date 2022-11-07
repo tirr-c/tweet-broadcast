@@ -107,14 +107,10 @@ async fn load_timeline_since(
 ) -> Result<model::ResponseItem<Vec<model::Tweet>>, Error> {
     let list_id = &list.id;
     let since_id = list.head.as_deref();
-    let max_results = if since_id.is_some() {
-        if catchup {
-            100
-        } else {
-            5
-        }
+    let max_results = if since_id.is_some() && catchup {
+        100
     } else {
-        1
+        5
     };
 
     let make_request = |token: Option<String>| {
