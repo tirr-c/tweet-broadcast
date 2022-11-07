@@ -1,6 +1,6 @@
 [package]
 name = "tweet-fetch"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Wonwoo Choi <chwo9843@gmail.com>"]
 license = "MIT"
 edition = "2021"
